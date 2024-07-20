@@ -22,12 +22,12 @@ contract GrandProductArgumentGasWrapper is TestBase {
         Fr claim,
         uint256 degree_bound,
         uint256 num_rounds
-    ) external view returns (Fr, Fr[] memory) {
+    ) public view returns (Fr, Fr[] memory) {
         return GrandProductArgument.verifySumcheckLayer(layer, transcript, claim, degree_bound, num_rounds);
     }
 
 
-    function buildEqEval(Fr[] memory rGrandProduct, Fr[] memory rSumcheck) external view returns (Fr eqEval) {
+    function buildEqEval(Fr[] memory rGrandProduct, Fr[] memory rSumcheck) public view returns (Fr eqEval) {
         return GrandProductArgument.buildEqEval(rGrandProduct, rSumcheck);
     }
 
@@ -41,7 +41,7 @@ contract GrandProductArgumentGasWrapper is TestBase {
         Fr[] memory claims,
         Fr[] memory rGrandProduct,
         Transcript memory transcript
-    ) external view returns (Fr[] memory newClaims, Fr[] memory newRGrandProduct) {
+    ) public view returns (Fr[] memory newClaims, Fr[] memory newRGrandProduct) {
         return GrandProductArgument.verifySumcheckClaim(layerProofs, layerIndex, coeffs, sumcheckClaim, eqEval, claims, rGrandProduct, transcript);
     }
 
@@ -75,16 +75,16 @@ contract GrandProductArgumentGasWrapper is TestBase {
             }
 
             // What's commented below works 
-            /* (Fr sumcheckClaim, Fr[] memory rSumcheck) =
-                verifySumcheckLayer(proof.layers[i], transcript, joined_claim, 3, i); */
+            (Fr sumcheckClaim, Fr[] memory rSumcheck) =
+                verifySumcheckLayer(proof.layers[i], transcript, joined_claim, 3, i);
 
             /* But the code below crashes because of a Sumcheck claim mismatch.
              *   
              * I'm using `this.verifySumcheckLayer` to use it as an external function
              * I also tried to make the wrapper functions fully external and call the verify code in the test directly 
              * and got same results */
-            (Fr sumcheckClaim, Fr[] memory rSumcheck) =
-                this.verifySumcheckLayer(proof.layers[i], transcript, joined_claim, 3, i);
+            /* (Fr sumcheckClaim, Fr[] memory rSumcheck) =
+                this.verifySumcheckLayer(proof.layers[i], transcript, joined_claim, 3, i); */
 
             if (rSumcheck.length != rGrandProduct.length) {
                 revert GrandProductArgumentFailed();
@@ -96,10 +96,10 @@ contract GrandProductArgumentGasWrapper is TestBase {
             }
 
             // works
-            /* Fr eqEval = buildEqEval(rGrandProduct, rSumcheck); */
+            Fr eqEval = buildEqEval(rGrandProduct, rSumcheck); 
 
             // crashes
-            Fr eqEval = this.buildEqEval(rGrandProduct, rSumcheck);
+            /* Fr eqEval = this.buildEqEval(rGrandProduct, rSumcheck); */
 
             rGrandProduct = new Fr[](rSumcheck.length);
             for (uint256 l = 0; l < rSumcheck.length; l++) {
@@ -108,12 +108,12 @@ contract GrandProductArgumentGasWrapper is TestBase {
 
 
             // works
-            /* (claims, rGrandProduct) =
-                verifySumcheckClaim(proof.layers, i, coeffs, sumcheckClaim, eqEval, claims, rGrandProduct, transcript); */
+            (claims, rGrandProduct) =
+                verifySumcheckClaim(proof.layers, i, coeffs, sumcheckClaim, eqEval, claims, rGrandProduct, transcript); 
 
             // crashes
-            (claims, rGrandProduct) =
-                this.verifySumcheckClaim(proof.layers, i, coeffs, sumcheckClaim, eqEval, claims, rGrandProduct, transcript);
+            /* (claims, rGrandProduct) =
+                this.verifySumcheckClaim(proof.layers, i, coeffs, sumcheckClaim, eqEval, claims, rGrandProduct, transcript); */
 
             /* From my investigations, it seems that the coeffs (that I'm getting via the fiat-shamir lib) are not valid when
              * using external functions ? */
