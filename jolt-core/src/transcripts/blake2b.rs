@@ -315,4 +315,150 @@ mod tests {
             "Reference multiplication mismatch"
         );
     }
+
+    /// Test vectors for Zolt serialization compatibility verification
+    /// Generates byte-level test vectors for field element serialization
+    #[test]
+    fn test_zolt_serialization_vectors() {
+        use ark_serialize::CanonicalSerialize;
+
+        println!("=== Serialization Test Vectors ===");
+
+        // Test 1: Field element 42
+        let scalar1: Fr = Fr::from(42u64);
+        let mut bytes1 = vec![];
+        scalar1.serialize_uncompressed(&mut bytes1).unwrap();
+        println!("Fr(42) serialized: {:02x?}", bytes1);
+
+        // Test 2: Field element 0
+        let scalar2: Fr = Fr::from(0u64);
+        let mut bytes2 = vec![];
+        scalar2.serialize_uncompressed(&mut bytes2).unwrap();
+        println!("Fr(0) serialized: {:02x?}", bytes2);
+
+        // Test 3: Field element 1
+        let scalar3: Fr = Fr::from(1u64);
+        let mut bytes3 = vec![];
+        scalar3.serialize_uncompressed(&mut bytes3).unwrap();
+        println!("Fr(1) serialized: {:02x?}", bytes3);
+
+        // Test 4: Large value
+        let scalar4: Fr = Fr::from(0xDEADBEEFu64);
+        let mut bytes4 = vec![];
+        scalar4.serialize_uncompressed(&mut bytes4).unwrap();
+        println!("Fr(0xDEADBEEF) serialized: {:02x?}", bytes4);
+
+        // Test 5: usize serialization (verify it's u64 LE)
+        let size: usize = 1234567890;
+        let size_bytes = (size as u64).to_le_bytes();
+        println!("usize(1234567890) serialized: {:02x?}", size_bytes);
+    }
+
+    /// Test vectors for Zolt compatibility verification
+    /// This test generates deterministic outputs that Zolt must match exactly
+    #[test]
+    fn test_zolt_compatibility_vectors() {
+        use ark_ff::BigInteger;
+        use ark_serialize::CanonicalSerialize;
+
+        // Test 1: Simple label and message
+        let mut t1 = Blake2bTranscript::new(b"zolt_test");
+        t1.append_message(b"hello");
+        let c1: Fr = t1.challenge_scalar_128_bits();
+
+        // Print the state and challenge for verification
+        println!("=== Test Vector 1: Simple label and message ===");
+        println!("Label: \"zolt_test\"");
+        println!("Message: \"hello\"");
+        println!("State after init: {:02x?}", t1.state);
+        println!("n_rounds: {}", t1.n_rounds);
+
+        let mut c1_bytes = vec![];
+        c1.serialize_uncompressed(&mut c1_bytes).unwrap();
+        println!("Challenge scalar (LE bytes): {:02x?}", c1_bytes);
+        println!("Challenge scalar limbs: {:?}", c1.0.0);
+
+        // Test 2: Multiple appends
+        let mut t2 = Blake2bTranscript::new(b"zolt_test_2");
+        t2.append_message(b"first");
+        t2.append_message(b"second");
+        t2.append_u64(12345);
+        let c2: Fr = t2.challenge_scalar();
+
+        println!("\n=== Test Vector 2: Multiple appends ===");
+        println!("Label: \"zolt_test_2\"");
+        println!("Messages: \"first\", \"second\", u64(12345)");
+        println!("State: {:02x?}", t2.state);
+        println!("n_rounds: {}", t2.n_rounds);
+
+        let mut c2_bytes = vec![];
+        c2.serialize_uncompressed(&mut c2_bytes).unwrap();
+        println!("Challenge scalar (LE bytes): {:02x?}", c2_bytes);
+
+        // Test 3: Scalar append
+        let mut t3 = Blake2bTranscript::new(b"scalar_test");
+        let scalar = Fr::from(42u64);
+        t3.append_scalar(&scalar);
+        let c3: Fr = t3.challenge_scalar();
+
+        println!("\n=== Test Vector 3: Scalar append ===");
+        println!("Label: \"scalar_test\"");
+        println!("Appended scalar: 42");
+        println!("State: {:02x?}", t3.state);
+        println!("n_rounds: {}", t3.n_rounds);
+
+        let mut c3_bytes = vec![];
+        c3.serialize_uncompressed(&mut c3_bytes).unwrap();
+        println!("Challenge scalar (LE bytes): {:02x?}", c3_bytes);
+
+        // Test 4: Vector append (with markers)
+        let mut t4 = Blake2bTranscript::new(b"vector_test");
+        let scalars: Vec<Fr> = vec![Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+        t4.append_scalars(&scalars);
+        let c4: Fr = t4.challenge_scalar();
+
+        println!("\n=== Test Vector 4: Vector append ===");
+        println!("Label: \"vector_test\"");
+        println!("Appended scalars: [1, 2, 3]");
+        println!("State: {:02x?}", t4.state);
+        println!("n_rounds: {}", t4.n_rounds);
+
+        let mut c4_bytes = vec![];
+        c4.serialize_uncompressed(&mut c4_bytes).unwrap();
+        println!("Challenge scalar (LE bytes): {:02x?}", c4_bytes);
+
+        // Test 5: Initial state after label
+        let t5 = Blake2bTranscript::new(b"init_test");
+        println!("\n=== Test Vector 5: Initial state ===");
+        println!("Label: \"init_test\"");
+        println!("Initial state: {:02x?}", t5.state);
+        println!("n_rounds: {}", t5.n_rounds);
+
+        // Test 6: Empty-ish operations
+        let mut t6 = Blake2bTranscript::new(b"");  // Empty label
+        println!("\n=== Test Vector 6: Empty label ===");
+        println!("Initial state: {:02x?}", t6.state);
+        println!("n_rounds: {}", t6.n_rounds);
+
+        // Append bytes directly
+        t6.append_bytes(&[0x01, 0x02, 0x03]);
+        let c6: Fr = t6.challenge_scalar();
+        println!("After append_bytes([0x01, 0x02, 0x03]):");
+        println!("State: {:02x?}", t6.state);
+        println!("n_rounds: {}", t6.n_rounds);
+
+        let mut c6_bytes = vec![];
+        c6.serialize_uncompressed(&mut c6_bytes).unwrap();
+        println!("Challenge scalar (LE bytes): {:02x?}", c6_bytes);
+
+        // Test 7: u128 challenge
+        let mut t7 = Blake2bTranscript::new(b"u128_test");
+        t7.append_message(b"data");
+        let c7_u128: u128 = t7.challenge_u128();
+        println!("\n=== Test Vector 7: u128 challenge ===");
+        println!("Label: \"u128_test\"");
+        println!("Message: \"data\"");
+        println!("Challenge u128: {}", c7_u128);
+        println!("Challenge u128 (hex): {:032x}", c7_u128);
+    }
 }
