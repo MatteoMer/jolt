@@ -642,3 +642,81 @@ mod tests {
         );
     }
 }
+
+#[test]
+fn test_export_pairing_reference() {
+    use ark_bn254::{G1Affine, G2Affine, Bn254};
+    use ark_ec::pairing::Pairing;
+    use ark_ec::AffineRepr;
+    use ark_ff::PrimeField;
+    use ark_serialize::CanonicalSerialize;
+    
+    println!("\n=== Reference Pairing Values for Zolt ===\n");
+    
+    // Get generators
+    let g1 = G1Affine::generator();
+    let g2 = G2Affine::generator();
+    
+    // Compute pairing
+    let pairing_result = Bn254::pairing(g1, g2);
+    
+    // Serialize the GT element  
+    let mut gt_bytes = vec![];
+    pairing_result.0.serialize_uncompressed(&mut gt_bytes).unwrap();
+    
+    println!("Pairing e(G1_gen, G2_gen) bytes ({} bytes):", gt_bytes.len());
+    for chunk in gt_bytes.chunks(32) {
+        print!("  ");
+        for byte in chunk {
+            print!("{:02x}", byte);
+        }
+        println!();
+    }
+    
+    // Also print as limbs for easier comparison
+    println!("\nAs u64 limbs (for Zolt Fp12 structure):");
+    let gt = pairing_result.0;
+    // Fp12 = Fp6 + Fp6*w
+    // Fp6 = Fp2 + Fp2*v + Fp2*v²
+    // Fp2 = Fp + Fp*u
+    // So we have 12 Fp elements
+    
+    fn print_fp(name: &str, fp: ark_bn254::Fq) {
+        let bytes = fp.into_bigint().0;
+        println!("{}: [{:#018x}, {:#018x}, {:#018x}, {:#018x}]", name, bytes[0], bytes[1], bytes[2], bytes[3]);
+    }
+    
+    println!("c0 (Fp6):");
+    println!("  c0 (Fp2):");
+    print_fp("    c0", gt.c0.c0.c0);
+    print_fp("    c1", gt.c0.c0.c1);
+    println!("  c1 (Fp2):");
+    print_fp("    c0", gt.c0.c1.c0);
+    print_fp("    c1", gt.c0.c1.c1);
+    println!("  c2 (Fp2):");
+    print_fp("    c0", gt.c0.c2.c0);
+    print_fp("    c1", gt.c0.c2.c1);
+    
+    println!("\nc1 (Fp6):");
+    println!("  c0 (Fp2):");
+    print_fp("    c0", gt.c1.c0.c0);
+    print_fp("    c1", gt.c1.c0.c1);
+    println!("  c1 (Fp2):");
+    print_fp("    c0", gt.c1.c1.c0);
+    print_fp("    c1", gt.c1.c1.c1);
+    println!("  c2 (Fp2):");
+    print_fp("    c0", gt.c1.c2.c0);
+    print_fp("    c1", gt.c1.c2.c1);
+    
+    println!("\n=== G1 Generator ===");
+    print_fp("x", g1.x);
+    print_fp("y", g1.y);
+
+    println!("\n=== G2 Generator ===");
+    println!("x (Fp2):");
+    print_fp("  c0", g2.x.c0);
+    print_fp("  c1", g2.x.c1);
+    println!("y (Fp2):");
+    print_fp("  c0", g2.y.c0);
+    print_fp("  c1", g2.y.c1);
+}

@@ -32,13 +32,13 @@ mod tests {
     /// Test that we can deserialize a Zolt-generated proof
     ///
     /// This test demonstrates the basic deserialization capability.
-    /// It requires a Zolt proof file at /tmp/zolt_proof.bin
+    /// It requires a Zolt proof file at /tmp/zolt_proof_dory.bin
     #[test]
     #[ignore = "requires Zolt proof file - run manually"]
     fn test_deserialize_zolt_proof() {
         use crate::zkvm::RV64IMACProof;
 
-        let proof_path = "/tmp/zolt_proof.bin";
+        let proof_path = "/tmp/zolt_proof_dory.bin";
         if !Path::new(proof_path).exists() {
             println!("Skipping test: Zolt proof not found at {}", proof_path);
             println!("Generate with: ./zolt prove program.elf --jolt-format -o {}", proof_path);
@@ -77,7 +77,7 @@ mod tests {
 
         // Check required files exist
         let preprocessing_path = "/tmp/jolt_verifier_preprocessing.dat";
-        let proof_path = "/tmp/zolt_proof.bin";
+        let proof_path = "/tmp/zolt_proof_dory.bin";
         let io_path = "/tmp/fib_io_device.bin";
 
         for path in [preprocessing_path, proof_path, io_path] {
@@ -112,6 +112,29 @@ mod tests {
         println!("Loaded all files, attempting verification...");
         println!("  Proof trace length: {}", proof.trace_length);
         println!("  Proof commitments: {}", proof.commitments.len());
+        println!("  Opening claims count: {}", proof.opening_claims.0.len());
+
+        // Debug: print all opening claims
+        println!("  Opening claims:");
+        for (key, (_point, claim)) in &proof.opening_claims.0 {
+            println!("    {:?} => {:?}", key, claim);
+        }
+
+        // Debug: print proof structure details
+        println!("\n  Stage 1 UniSkip proof:");
+        println!("    uni_poly coeffs count: {}", proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs.len());
+        if proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs.len() >= 3 {
+            println!("    first 3 coeffs: {:?}, {:?}, {:?}",
+                proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs[0],
+                proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs[1],
+                proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs[2]);
+        }
+
+        println!("  Stage 1 sumcheck proof:");
+        println!("    compressed_polys count: {}", proof.stage1_sumcheck_proof.compressed_polys.len());
+        for (i, poly) in proof.stage1_sumcheck_proof.compressed_polys.iter().enumerate().take(3) {
+            println!("    round {} coeffs: {:?}", i, poly.coeffs_except_linear_term);
+        }
 
         // Create verifier
         match RV64IMACVerifier::new(
@@ -138,6 +161,177 @@ mod tests {
         }
     }
 
+    /// Test loading Zolt-exported preprocessing
+    ///
+    /// This test verifies that Zolt can export preprocessing that Jolt can load.
+    /// Requires:
+    /// - /tmp/zolt_preprocessing.bin (from Zolt with --export-preprocessing)
+    #[test]
+    #[ignore = "requires Zolt preprocessing export - run manually"]
+    fn test_load_zolt_preprocessing() {
+        use crate::zkvm::verifier::JoltVerifierPreprocessing;
+        use crate::poly::commitment::dory::DoryCommitmentScheme;
+
+        type PreprocessingType = JoltVerifierPreprocessing<ark_bn254::Fr, DoryCommitmentScheme>;
+
+        let preprocessing_path = "/tmp/zolt_preprocessing.bin";
+        if !Path::new(preprocessing_path).exists() {
+            println!("Missing Zolt preprocessing file at {}", preprocessing_path);
+            println!("\nGenerate with:");
+            println!("  ./zolt prove examples/fibonacci.elf --export-preprocessing {} -o proof.bin",
+                preprocessing_path);
+            return;
+        }
+
+        let preprocessing_bytes = fs::read(preprocessing_path)
+            .expect("Failed to read Zolt preprocessing");
+        println!("Read {} bytes from Zolt preprocessing", preprocessing_bytes.len());
+
+        // Dump first 200 bytes for debugging
+        println!("First 200 bytes:");
+        for (i, chunk) in preprocessing_bytes[..std::cmp::min(200, preprocessing_bytes.len())].chunks(16).enumerate() {
+            print!("{:04x}: ", i * 16);
+            for b in chunk {
+                print!("{:02x} ", b);
+            }
+            println!();
+        }
+
+        // Try to deserialize
+        match PreprocessingType::deserialize_from_bytes(&preprocessing_bytes) {
+            Ok(preprocessing) => {
+                println!("Successfully deserialized Zolt preprocessing!");
+                println!("  Memory layout: {:?}", preprocessing.shared.memory_layout);
+                println!("  Bytecode size: {}", preprocessing.shared.bytecode.code_size);
+                println!("  RAM min_bytecode_address: {}", preprocessing.shared.ram.min_bytecode_address);
+            }
+            Err(e) => {
+                println!("Failed to deserialize Zolt preprocessing: {:?}", e);
+
+                // Try to parse just the verifier setup to debug
+                println!("\nTrying to parse verifier setup separately...");
+                use ark_serialize::CanonicalDeserialize;
+                use crate::poly::commitment::dory::ArkworksVerifierSetup;
+
+                match ArkworksVerifierSetup::deserialize_uncompressed(&preprocessing_bytes[..]) {
+                    Ok(setup) => {
+                        println!("  Verifier setup parsed OK!");
+                        println!("  max_log_n: {}", setup.0.max_log_n);
+                        println!("  delta_1l len: {}", setup.0.delta_1l.len());
+                        println!("  chi len: {}", setup.0.chi.len());
+                    }
+                    Err(e2) => {
+                        println!("  Failed to parse verifier setup: {:?}", e2);
+                    }
+                }
+
+                panic!("Deserialization failed: {:?}", e);
+            }
+        }
+    }
+
+    /// Test verification with Zolt-exported proof AND preprocessing
+    ///
+    /// This is the full cross-verification test where both proof and preprocessing
+    /// come from Zolt.
+    ///
+    /// Requires:
+    /// - /tmp/zolt_preprocessing.bin (from Zolt with --export-preprocessing)
+    /// - /tmp/zolt_proof_dory.bin (from Zolt)
+    #[test]
+    #[ignore = "requires Zolt proof and preprocessing - run manually"]
+    fn test_verify_zolt_proof_with_zolt_preprocessing() {
+        use crate::zkvm::{RV64IMACProof, RV64IMACVerifier};
+        use crate::zkvm::verifier::JoltVerifierPreprocessing;
+        use crate::poly::commitment::dory::DoryCommitmentScheme;
+        use common::jolt_device::JoltDevice;
+
+        type PreprocessingType = JoltVerifierPreprocessing<ark_bn254::Fr, DoryCommitmentScheme>;
+
+        let preprocessing_path = "/tmp/zolt_preprocessing.bin";
+        let proof_path = "/tmp/zolt_proof_dory.bin";
+
+        // Check files exist
+        for path in [preprocessing_path, proof_path] {
+            if !Path::new(path).exists() {
+                println!("Missing required file: {}", path);
+                println!("\nGenerate with:");
+                println!("  ./zolt prove examples/fibonacci.elf \\");
+                println!("    --export-preprocessing {} \\", preprocessing_path);
+                println!("    -o {}", proof_path);
+                return;
+            }
+        }
+
+        // Load preprocessing
+        let preprocessing_bytes = fs::read(preprocessing_path)
+            .expect("Failed to read preprocessing");
+        let preprocessing = PreprocessingType::deserialize_from_bytes(&preprocessing_bytes)
+            .expect("Failed to deserialize preprocessing");
+
+        // Load proof
+        let proof_bytes = fs::read(proof_path).expect("Failed to read proof");
+        let proof = RV64IMACProof::deserialize_from_bytes(&proof_bytes)
+            .expect("Failed to deserialize proof");
+
+        // Create minimal program I/O (no inputs/outputs for bare-metal fibonacci)
+        let program_io = JoltDevice {
+            memory_layout: preprocessing.shared.memory_layout.clone(),
+            ..Default::default()
+        };
+
+        println!("Loaded all files:");
+        println!("  Preprocessing: {} bytes", preprocessing_bytes.len());
+        println!("  Proof: {} bytes", proof_bytes.len());
+        println!("  Trace length: {}", proof.trace_length);
+        println!("  Commitments: {}", proof.commitments.len());
+
+        // Create verifier
+        match RV64IMACVerifier::new(
+            &preprocessing,
+            proof,
+            program_io,
+            None, // no trusted advice
+            None, // no debug info
+        ) {
+            Ok(verifier) => {
+                println!("Verifier created, running verification...");
+                match verifier.verify() {
+                    Ok(()) => {
+                        println!("SUCCESS: Zolt proof verified by Jolt!");
+                    }
+                    Err(e) => {
+                        println!("Verification failed: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Failed to create verifier: {:?}", e);
+            }
+        }
+    }
+
+    /// Test GT (Dory commitment) serialization size
+    #[test]
+    fn test_gt_serialization_size() {
+        use ark_serialize::CanonicalSerialize;
+        use ark_bn254::Fq12;
+        use ark_ff::One;
+
+        // Fq12 is the target group for BN254 pairing
+        let gt = Fq12::one();
+        let mut bytes = Vec::new();
+        gt.serialize_compressed(&mut bytes).expect("serialize");
+        println!("Fq12 (GT) compressed size: {} bytes", bytes.len());
+
+        bytes.clear();
+        gt.serialize_uncompressed(&mut bytes).expect("serialize");
+        println!("Fq12 (GT) uncompressed size: {} bytes", bytes.len());
+
+        // Dump first bytes
+        println!("First bytes: {:02x?}", &bytes[..std::cmp::min(64, bytes.len())]);
+    }
+
     /// Minimal test to verify byte format compatibility
     ///
     /// This generates a proof in Jolt, serializes it, and verifies
@@ -161,5 +355,484 @@ mod tests {
         assert_eq!(fe, fe2, "Roundtrip should preserve value");
 
         println!("Basic field element roundtrip: OK");
+    }
+
+    /// Debug test to see what format Zolt is producing
+    #[test]
+    #[ignore = "debug test for format analysis"]
+    fn test_debug_zolt_format() {
+        use ark_serialize::CanonicalDeserialize;
+        use ark_bn254::Fr;
+        use crate::poly::opening_proof::SumcheckId;
+        use strum::EnumCount;
+
+        // Use the new Dory proof
+        let proof_path = "/tmp/zolt_proof_dory.bin";
+        if !Path::new(proof_path).exists() {
+            println!("No proof file at {}", proof_path);
+            return;
+        }
+
+        let proof_bytes = fs::read(proof_path).expect("Failed to read Zolt proof");
+        println!("Total bytes: {}", proof_bytes.len());
+        println!("SumcheckId::COUNT = {}", SumcheckId::COUNT);
+
+        // Dump first 200 bytes in hex
+        println!("\nFirst 200 bytes:");
+        for (i, chunk) in proof_bytes[..std::cmp::min(200, proof_bytes.len())].chunks(16).enumerate() {
+            print!("{:04x}: ", i * 16);
+            for b in chunk {
+                print!("{:02x} ", b);
+            }
+            println!();
+        }
+
+        // Constants matching Jolt
+        let untrusted_advice_base: u8 = 0;
+        let trusted_advice_base: u8 = SumcheckId::COUNT as u8;  // 22
+        let committed_base: u8 = trusted_advice_base + SumcheckId::COUNT as u8;  // 44
+        let virtual_base: u8 = committed_base + SumcheckId::COUNT as u8;  // 66
+
+        println!("\nBases: untrusted={}, trusted={}, committed={}, virtual={}",
+            untrusted_advice_base, trusted_advice_base, committed_base, virtual_base);
+
+        // Try to parse the length of opening claims
+        if proof_bytes.len() >= 8 {
+            let len_bytes: [u8; 8] = proof_bytes[0..8].try_into().unwrap();
+            let claims_len = u64::from_le_bytes(len_bytes);
+            println!("\nOpening claims length: {}", claims_len);
+
+            // Try to parse each claim
+            let mut offset = 8usize;
+            for i in 0..claims_len {
+                if offset >= proof_bytes.len() {
+                    println!("  Ran out of bytes at claim {}", i);
+                    break;
+                }
+
+                // Opening ID first byte
+                let first_byte = proof_bytes[offset];
+                println!("\n  Claim {}: opening_id first byte = 0x{:02x} ({})", i, first_byte, first_byte);
+                offset += 1;
+
+                // Decode the opening type
+                if first_byte < trusted_advice_base {
+                    println!("    Type: UntrustedAdvice({})", first_byte);
+                } else if first_byte < committed_base {
+                    println!("    Type: TrustedAdvice({})", first_byte - trusted_advice_base);
+                } else if first_byte < virtual_base {
+                    // Committed - has poly after
+                    let sumcheck_id = first_byte - committed_base;
+                    println!("    Type: Committed(sumcheck={})", sumcheck_id);
+                    if offset < proof_bytes.len() {
+                        let poly_byte = proof_bytes[offset];
+                        println!("    poly type byte = 0x{:02x} ({})", poly_byte, poly_byte);
+                        offset += 1;
+                        if poly_byte >= 2 && poly_byte <= 4 && offset < proof_bytes.len() {
+                            let idx_byte = proof_bytes[offset];
+                            println!("    poly index = {}", idx_byte);
+                            offset += 1;
+                        }
+                    }
+                } else {
+                    // Virtual - has poly after
+                    let sumcheck_id = first_byte - virtual_base;
+                    println!("    Type: Virtual(sumcheck={})", sumcheck_id);
+                    if offset < proof_bytes.len() {
+                        let poly_byte = proof_bytes[offset];
+                        println!("    VirtualPoly type = {} (0x{:02x})", poly_byte, poly_byte);
+                        offset += 1;
+                        // InstructionRa, OpFlags, InstructionFlags, LookupTableFlag have index
+                        if poly_byte == 27 || poly_byte == 38 || poly_byte == 39 || poly_byte == 40 {
+                            if offset < proof_bytes.len() {
+                                let idx_byte = proof_bytes[offset];
+                                println!("    poly index = {}", idx_byte);
+                                offset += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Field element (32 bytes)
+                if offset + 32 > proof_bytes.len() {
+                    println!("    Not enough bytes for field element!");
+                    break;
+                }
+                let fe_slice = &proof_bytes[offset..offset + 32];
+                println!("    claim bytes: {:02x} {:02x} {:02x} {:02x} ...",
+                    fe_slice[0], fe_slice[1], fe_slice[2], fe_slice[3]);
+
+                // Try to deserialize as Fr
+                match Fr::deserialize_compressed(fe_slice) {
+                    Ok(_fe) => println!("    claim: valid Fr"),
+                    Err(e) => println!("    claim: INVALID Fr: {:?}", e),
+                }
+                offset += 32;
+            }
+
+            println!("\n\nAfter claims, offset = {}", offset);
+            println!("Next section: commitments");
+
+            // Try to parse commitments length
+            if offset + 8 <= proof_bytes.len() {
+                let comm_len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                let comm_len = u64::from_le_bytes(comm_len_bytes);
+                println!("Commitments length: {}", comm_len);
+                offset += 8;
+
+                // Parse GT commitments (384 bytes each)
+                for i in 0..comm_len {
+                    if offset + 384 > proof_bytes.len() {
+                        println!("  Commitment {}: not enough bytes (need 384, have {})",
+                            i, proof_bytes.len() - offset);
+                        break;
+                    }
+                    let comm_slice = &proof_bytes[offset..offset+384];
+                    println!("  Commitment {}: first bytes {:02x} {:02x} {:02x} {:02x} ...",
+                        i, comm_slice[0], comm_slice[1], comm_slice[2], comm_slice[3]);
+
+                    // Try to deserialize as Fq12
+                    use ark_serialize::CanonicalDeserialize;
+                    use ark_bn254::Fq12;
+                    match Fq12::deserialize_uncompressed(comm_slice) {
+                        Ok(_) => println!("    Valid GT element"),
+                        Err(e) => println!("    INVALID GT: {:?}", e),
+                    }
+                    offset += 384;
+                }
+
+                println!("\nAfter commitments, offset = {}", offset);
+                println!("Remaining bytes: {}", proof_bytes.len() - offset);
+            }
+        }
+    }
+
+    /// Export a test Dory commitment for comparison with Zolt
+    ///
+    /// This commits to a small test polynomial using Jolt's Dory and exports
+    /// the resulting GT element so Zolt can compare its commitment.
+    #[test]
+    #[ignore = "run manually to generate test commitment"]
+    fn test_export_dory_commitment() {
+        use crate::poly::commitment::dory::{DoryCommitmentScheme, DoryGlobals, DoryContext};
+        use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+        use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+        use ark_serialize::CanonicalSerialize;
+        use ark_bn254::Fr;
+        use std::io::Write;
+
+        // Simple test polynomial: [1, 2, 3, 4, 5, 6, 7, 8]
+        let coeffs: Vec<Fr> = (1u64..=8).map(|i| Fr::from(i)).collect();
+        let poly: MultilinearPolynomial<Fr> = coeffs.into();
+
+        // Initialize Dory globals - need K=1 (single polynomial), T=8 (coefficients)
+        let _guard = DoryGlobals::initialize(1, 8);
+
+        // Setup prover (uses "Jolt Dory URS seed")
+        let prover_setup = DoryCommitmentScheme::setup_prover(3); // 2^3 = 8 coefficients
+
+        println!("Dory initialized:");
+        println!("  num_columns = {}", DoryGlobals::get_num_columns());
+        println!("  max_num_rows = {}", DoryGlobals::get_max_num_rows());
+
+        // Commit
+        let (commitment, _row_commitments) = DoryCommitmentScheme::commit(&poly, &prover_setup);
+
+        // Serialize commitment
+        let mut buf = Vec::new();
+        commitment.serialize_uncompressed(&mut buf).expect("serialize");
+
+        println!("\nCommitment (GT element):");
+        println!("  Size: {} bytes", buf.len());
+        println!("  First 16 bytes: {:02x?}", &buf[..16]);
+        println!("  Last 16 bytes: {:02x?}", &buf[buf.len()-16..]);
+
+        // Write to file
+        let output_path = "/tmp/jolt_test_commitment.bin";
+        let mut file = std::fs::File::create(output_path).expect("create file");
+
+        // Write header
+        file.write_all(b"JOLT_COMM_V1").expect("write header");
+        file.write_all(&8u64.to_le_bytes()).expect("write poly_len");
+
+        // Write polynomial coefficients (just the original coeffs)
+        for i in 0..8 {
+            let coeff = poly.get_coeff(i);
+            let mut cbuf = Vec::new();
+            coeff.serialize_compressed(&mut cbuf).expect("serialize coeff");
+            file.write_all(&cbuf).expect("write coeff");
+        }
+
+        // Write commitment
+        file.write_all(&buf).expect("write commitment");
+
+        println!("\nExported to {}", output_path);
+    }
+
+    /// Export Dory SRS to a file for use by Zolt
+    ///
+    /// This generates the same SRS that Jolt uses (from "Jolt Dory URS seed")
+    /// and serializes it to a file that Zolt can load.
+    #[test]
+    #[ignore = "run manually to generate SRS file"]
+    fn test_export_dory_srs() {
+        use crate::poly::commitment::dory::{DoryCommitmentScheme, ArkworksProverSetup};
+        use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+        use ark_serialize::CanonicalSerialize;
+        use ark_ec::CurveGroup;
+        use std::io::Write;
+
+        use crate::poly::commitment::dory::DoryGlobals;
+
+        // Generate SRS with 3 variables (8 coefficients, 4 G1 + 2 G2 points)
+        // Must match the debug test which uses max_num_vars=3
+        let max_num_vars = 3;
+        println!("Generating Dory SRS with max_num_vars = {}", max_num_vars);
+
+        // Initialize DoryGlobals with K=1 polynomial, T=8 coefficients
+        let _guard = DoryGlobals::initialize(1, 8);
+
+        let prover_setup: ArkworksProverSetup = DoryCommitmentScheme::setup_prover(max_num_vars);
+
+        // Export to file
+        let output_path = "/tmp/jolt_dory_srs.bin";
+        let mut file = std::fs::File::create(output_path).expect("create file");
+
+        // Write header
+        file.write_all(b"JOLT_DORY_SRS_V1").expect("write header");
+        file.write_all(&(max_num_vars as u64).to_le_bytes()).expect("write num vars");
+
+        // Write G1 points count and data
+        let g1_count = prover_setup.g1_vec.len() as u64;
+        file.write_all(&g1_count.to_le_bytes()).expect("write g1 count");
+        println!("Writing {} G1 points", g1_count);
+
+        for (i, g1) in prover_setup.g1_vec.iter().enumerate() {
+            // Convert projective to affine before serializing
+            let g1_affine: ark_bn254::G1Affine = g1.0.into_affine();
+            let mut buf = Vec::new();
+            g1_affine.serialize_uncompressed(&mut buf).expect("serialize G1");
+            file.write_all(&buf).expect("write G1");
+            if i < 3 {
+                println!("  G1[{}]: {} bytes, first 8: {:02x?}", i, buf.len(), &buf[..8]);
+            }
+        }
+
+        // Write G2 points count and data
+        let g2_count = prover_setup.g2_vec.len() as u64;
+        file.write_all(&g2_count.to_le_bytes()).expect("write g2 count");
+        println!("Writing {} G2 points", g2_count);
+
+        for (i, g2) in prover_setup.g2_vec.iter().enumerate() {
+            // Convert projective to affine before serializing
+            let g2_affine: ark_bn254::G2Affine = g2.0.into_affine();
+            let mut buf = Vec::new();
+            g2_affine.serialize_uncompressed(&mut buf).expect("serialize G2");
+            file.write_all(&buf).expect("write G2");
+            if i < 3 {
+                println!("  G2[{}]: {} bytes, first 8: {:02x?}", i, buf.len(), &buf[..8]);
+            }
+        }
+
+        // Write blinding generators (convert projective to affine)
+        let h1_affine: ark_bn254::G1Affine = prover_setup.h1.0.into_affine();
+        let mut buf = Vec::new();
+        h1_affine.serialize_uncompressed(&mut buf).expect("serialize h1");
+        file.write_all(&buf).expect("write h1");
+        println!("h1: {} bytes", buf.len());
+
+        let h2_affine: ark_bn254::G2Affine = prover_setup.h2.0.into_affine();
+        buf.clear();
+        h2_affine.serialize_uncompressed(&mut buf).expect("serialize h2");
+        file.write_all(&buf).expect("write h2");
+        println!("h2: {} bytes", buf.len());
+
+        println!("\nExported Dory SRS to {}", output_path);
+        println!("Total file size: {} bytes", std::fs::metadata(output_path).expect("stat").len());
+    }
+
+    /// Export detailed Dory commitment intermediate values
+    ///
+    /// This test exports the MSM result (row commitment) and pairing result
+    /// so we can compare intermediate values with Zolt.
+    #[test]
+    #[ignore = "run manually to debug commitment"]
+    fn test_export_dory_commitment_debug() {
+        use crate::poly::commitment::dory::{DoryCommitmentScheme, DoryGlobals};
+        use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+        use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+        use ark_serialize::CanonicalSerialize;
+        use ark_bn254::{Fr, G1Affine, G2Affine, Bn254};
+        use ark_ec::{pairing::Pairing, VariableBaseMSM, CurveGroup};
+        use std::io::Write;
+
+        // Simple test polynomial: [1, 2, 3, 4, 5, 6, 7, 8]
+        let coeffs: Vec<Fr> = (1u64..=8).map(|i| Fr::from(i)).collect();
+        let poly: MultilinearPolynomial<Fr> = coeffs.into();
+
+        // Initialize Dory globals - need K=1 (single polynomial), T=8 (coefficients)
+        let _guard = DoryGlobals::initialize(1, 8);
+
+        // Setup prover (uses "Jolt Dory URS seed")
+        let prover_setup = DoryCommitmentScheme::setup_prover(3); // 2^3 = 8 coefficients
+
+        let num_cols = DoryGlobals::get_num_columns();
+        let num_rows = DoryGlobals::get_max_num_rows();
+        let sigma = num_cols.ilog2() as usize;
+        let nu = num_rows.ilog2() as usize;
+
+        println!("Dory commitment debug:");
+        println!("  sigma = {} (num_cols = {})", sigma, num_cols);
+        println!("  nu = {} (num_rows = {})", nu, num_rows);
+
+        // Print first 4 G1 points for debugging
+        println!("\nG1 points in SRS:");
+        for i in 0..4 {
+            let g1_i: G1Affine = prover_setup.g1_vec[i].0.into_affine();
+            let mut buf = Vec::new();
+            g1_i.serialize_uncompressed(&mut buf).expect("serialize");
+            println!("  G1[{}] x first 16: {:02x?}, y first 16: {:02x?}", i, &buf[..16], &buf[32..48]);
+            // Print y coordinate as decimal to verify it's < modulus
+            use ark_ff::PrimeField;
+            let y_int = g1_i.y.into_bigint();
+            let y_limbs = y_int.0;
+            println!("    y limbs: {:016x} {:016x} {:016x} {:016x}",
+                y_limbs[0], y_limbs[1], y_limbs[2], y_limbs[3]);
+        }
+
+        // Test: G1[0] * 2
+        let g1_0: G1Affine = prover_setup.g1_vec[0].0.into_affine();
+        let scalar_2 = Fr::from(2u64);
+        let g1_times_2: ark_bn254::G1Projective = VariableBaseMSM::msm_unchecked(&[g1_0], &[scalar_2]);
+        let g1_times_2_affine: G1Affine = g1_times_2.into_affine();
+        let mut buf = Vec::new();
+        g1_times_2_affine.serialize_uncompressed(&mut buf).expect("serialize");
+        println!("\nG1[0]*2 x first 16 bytes: {:02x?}", &buf[..16]);
+
+        // Test: G1[0]*1 + G1[1]*1 (adding two points)
+        let g1_1: G1Affine = prover_setup.g1_vec[1].0.into_affine();
+        let scalar_1 = Fr::from(1u64);
+        let g1_sum: ark_bn254::G1Projective = VariableBaseMSM::msm_unchecked(&[g1_0, g1_1], &[scalar_1, scalar_1]);
+        let g1_sum_affine: G1Affine = g1_sum.into_affine();
+        buf.clear();
+        g1_sum_affine.serialize_uncompressed(&mut buf).expect("serialize");
+        println!("G1[0]+G1[1] x first 16 bytes: {:02x?}", &buf[..16]);
+
+        // Get G1 generators as affine (taking first num_cols)
+        let g1_bases: Vec<G1Affine> = prover_setup.g1_vec[..num_cols]
+            .iter()
+            .map(|g| g.0.into_affine())
+            .collect();
+
+        // Get G2 generators as affine
+        let g2_bases: Vec<G2Affine> = prover_setup.g2_vec[..num_rows]
+            .iter()
+            .map(|g| g.0.into_affine())
+            .collect();
+
+        // Print G2 points for debugging
+        println!("\nG2 points in SRS:");
+        for i in 0..2 {
+            let g2_i: G2Affine = prover_setup.g2_vec[i].0.into_affine();
+            let mut buf = Vec::new();
+            g2_i.serialize_uncompressed(&mut buf).expect("serialize");
+
+            // Print all 4 Fp components: x.c0, x.c1, y.c0, y.c1
+            println!("  G2[{}]:", i);
+            println!("    x.c0 first 16: {:02x?}", &buf[0..16]);
+            println!("    x.c1 first 16: {:02x?}", &buf[32..48]);
+            println!("    y.c0 first 16: {:02x?}", &buf[64..80]);
+            println!("    y.c1 first 16: {:02x?}", &buf[96..112]);
+        }
+
+        // Test: Pairing of G1 generator with G2 generator
+        use ark_ec::AffineRepr;
+        let g1_gen = G1Affine::generator();
+        let g2_gen = G2Affine::generator();
+
+        // Print G2 generator coordinates
+        println!("\nG2 generator:");
+        let mut g2_buf = Vec::new();
+        g2_gen.serialize_uncompressed(&mut g2_buf).expect("serialize");
+        println!("  x.c0 first 16: {:02x?}", &g2_buf[0..16]);
+        println!("  x.c1 first 16: {:02x?}", &g2_buf[32..48]);
+        println!("  y.c0 first 16: {:02x?}", &g2_buf[64..80]);
+        println!("  y.c1 first 16: {:02x?}", &g2_buf[96..112]);
+
+        let gen_pairing = Bn254::pairing(g1_gen, g2_gen);
+        let mut buf_gen = Vec::new();
+        gen_pairing.0.serialize_uncompressed(&mut buf_gen).expect("serialize");
+        println!("\ne(G1_gen, G2_gen) first 16 bytes: {:02x?}", &buf_gen[..16]);
+
+        // Output file for debug info
+        let output_path = "/tmp/jolt_dory_debug.bin";
+        let mut file = std::fs::File::create(output_path).expect("create file");
+
+        // Write header
+        file.write_all(b"JOLT_DORY_DBG1").expect("write header");
+        file.write_all(&(num_cols as u64).to_le_bytes()).expect("write num_cols");
+        file.write_all(&(num_rows as u64).to_le_bytes()).expect("write num_rows");
+
+        // Compute row commitments and export them
+        println!("\nRow commitments (G1 MSM results):");
+        let mut row_commits: Vec<G1Affine> = Vec::new();
+
+        for row_idx in 0..num_rows {
+            let start = row_idx * num_cols;
+            let end = std::cmp::min(start + num_cols, 8);
+
+            // Get coefficients for this row
+            let row_coeffs: Vec<Fr> = (start..end)
+                .map(|i| if i < 8 { Fr::from((i + 1) as u64) } else { Fr::from(0u64) })
+                .collect();
+
+            println!("  Row {}: start={}, end={}, coeffs={:?}", row_idx, start, end,
+                row_coeffs.iter().map(|f| {
+                    let mut buf = [0u8; 32];
+                    f.serialize_compressed(&mut buf[..]).ok();
+                    buf[0] as u64  // Just show low byte
+                }).collect::<Vec<_>>()
+            );
+
+            // Compute MSM
+            let row_commit: ark_bn254::G1Projective = VariableBaseMSM::msm_unchecked(&g1_bases[..row_coeffs.len()], &row_coeffs);
+            let row_commit_affine: G1Affine = row_commit.into_affine();
+            row_commits.push(row_commit_affine);
+
+            // Serialize row commitment
+            let mut buf = Vec::new();
+            row_commit_affine.serialize_uncompressed(&mut buf).expect("serialize");
+            file.write_all(&buf).expect("write row commitment");
+
+            println!("    G1 result first 16 bytes: {:02x?}", &buf[..16]);
+        }
+
+        // Compute individual pairings and the final multi-pairing
+        println!("\nIndividual pairings:");
+        for (i, (g1, g2)) in row_commits.iter().zip(g2_bases.iter()).enumerate() {
+            let paired = Bn254::pairing(*g1, *g2);
+            let mut buf = Vec::new();
+            paired.0.serialize_uncompressed(&mut buf).expect("serialize");
+            file.write_all(&buf).expect("write pairing");
+            println!("  Pairing({}, {}) first 16 bytes: {:02x?}", i, i, &buf[..16]);
+        }
+
+        // Compute multi-pairing (should be equivalent to product of individual pairings)
+        let multi_pairing = Bn254::multi_pairing(&row_commits, &g2_bases);
+        let mut buf = Vec::new();
+        multi_pairing.0.serialize_uncompressed(&mut buf).expect("serialize");
+        file.write_all(&buf).expect("write multi pairing");
+        println!("\nMulti-pairing first 16 bytes: {:02x?}", &buf[..16]);
+
+        // Also compute product of individual pairings for comparison
+        let mut product = Bn254::pairing(row_commits[0], g2_bases[0]);
+        for i in 1..row_commits.len() {
+            product = product + Bn254::pairing(row_commits[i], g2_bases[i]);
+        }
+        let mut buf = Vec::new();
+        product.0.serialize_uncompressed(&mut buf).expect("serialize");
+        println!("Product of pairings first 16 bytes: {:02x?}", &buf[..16]);
+
+        println!("\nExported debug info to {}", output_path);
     }
 }
