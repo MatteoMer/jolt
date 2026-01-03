@@ -124,14 +124,39 @@ pub fn fiat_shamir_preamble(
     trace_length: usize,
     transcript: &mut impl Transcript,
 ) {
+    eprintln!("\n[JOLT PREAMBLE] === Fiat-Shamir Preamble Start ===");
+
+    eprintln!("[JOLT PREAMBLE] appendU64: max_input_size={}", program_io.memory_layout.max_input_size);
     transcript.append_u64(program_io.memory_layout.max_input_size);
+
+    eprintln!("[JOLT PREAMBLE] appendU64: max_output_size={}", program_io.memory_layout.max_output_size);
     transcript.append_u64(program_io.memory_layout.max_output_size);
+
+    eprintln!("[JOLT PREAMBLE] appendU64: memory_size={}", program_io.memory_layout.memory_size);
     transcript.append_u64(program_io.memory_layout.memory_size);
+
+    eprintln!("[JOLT PREAMBLE] appendBytes: inputs.len={}", program_io.inputs.len());
+    if !program_io.inputs.is_empty() && program_io.inputs.len() <= 32 {
+        eprintln!("[JOLT PREAMBLE]   inputs={:02x?}", program_io.inputs);
+    }
     transcript.append_bytes(&program_io.inputs);
+
+    eprintln!("[JOLT PREAMBLE] appendBytes: outputs.len={}", program_io.outputs.len());
+    if !program_io.outputs.is_empty() && program_io.outputs.len() <= 32 {
+        eprintln!("[JOLT PREAMBLE]   outputs={:02x?}", program_io.outputs);
+    }
     transcript.append_bytes(&program_io.outputs);
+
+    eprintln!("[JOLT PREAMBLE] appendU64: panic={}", program_io.panic as u64);
     transcript.append_u64(program_io.panic as u64);
+
+    eprintln!("[JOLT PREAMBLE] appendU64: ram_K={}", ram_K);
     transcript.append_u64(ram_K as u64);
+
+    eprintln!("[JOLT PREAMBLE] appendU64: trace_length={}", trace_length);
     transcript.append_u64(trace_length as u64);
+
+    eprintln!("[JOLT PREAMBLE] === Fiat-Shamir Preamble End ===\n");
 }
 
 #[cfg(feature = "prover")]

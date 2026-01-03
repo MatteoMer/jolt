@@ -79,7 +79,16 @@ impl<F: JoltField> UniformRand for MontU128Challenge<F> {
 impl Into<ark_bn254::Fr> for MontU128Challenge<ark_bn254::Fr> {
     #[inline(always)]
     fn into(self) -> ark_bn254::Fr {
-        ark_bn254::Fr::from_bigint_unchecked(BigInt::new(self.value())).unwrap()
+        let bigint = BigInt::new(self.value());
+        // Debug: print first conversion
+        static PRINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !PRINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[JOLT DEBUG] Into<Fr> first call:");
+            eprintln!("[JOLT DEBUG]   value=[{:#018x}, {:#018x}, {:#018x}, {:#018x}]",
+                self.value()[0], self.value()[1], self.value()[2], self.value()[3]);
+            eprintln!("[JOLT DEBUG]   bigint={}", bigint);
+        }
+        ark_bn254::Fr::from_bigint_unchecked(bigint).unwrap()
     }
 }
 impl Into<ark_bn254::Fr> for &MontU128Challenge<ark_bn254::Fr> {

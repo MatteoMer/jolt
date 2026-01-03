@@ -167,16 +167,28 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         );
 
         // Append commitments to transcript
-        for commitment in &self.proof.commitments {
+        for (i, commitment) in self.proof.commitments.iter().enumerate() {
+            // Debug: serialize and show the first bytes
+            use ark_serialize::CanonicalSerialize;
+            let mut buf = Vec::new();
+            commitment.serialize_uncompressed(&mut buf).expect("serialize");
+            eprintln!("[JOLT] Appending commitment {}: raw first 16 = {:02x?}", i, &buf[..16.min(buf.len())]);
+            eprintln!("[JOLT]   raw last 16 = {:02x?}", &buf[buf.len().saturating_sub(16)..]);
+            // Show what it looks like after reversing
+            let reversed: Vec<u8> = buf.iter().rev().cloned().collect();
+            eprintln!("[JOLT]   reversed first 16 = {:02x?}", &reversed[..16.min(reversed.len())]);
+            eprintln!("[JOLT]   reversed last 16 = {:02x?}", &reversed[reversed.len().saturating_sub(16)..]);
             self.transcript.append_serializable(commitment);
         }
         // Append untrusted advice commitment to transcript
         if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
+            eprintln!("[JOLT] Appending untrusted_advice_commitment");
             self.transcript
                 .append_serializable(untrusted_advice_commitment);
         }
         // Append trusted advice commitment to transcript
         if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
+            eprintln!("[JOLT] Appending trusted_advice_commitment");
             self.transcript
                 .append_serializable(trusted_advice_commitment);
         }

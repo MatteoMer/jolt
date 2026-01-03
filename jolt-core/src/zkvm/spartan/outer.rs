@@ -89,6 +89,13 @@ impl<F: JoltField> OuterUniSkipParams<F> {
     pub fn new<T: Transcript>(key: &UniformSpartanKey<F>, transcript: &mut T) -> Self {
         let num_rounds_x: usize = key.num_rows_bits();
         let tau = transcript.challenge_vector_optimized::<F>(num_rounds_x);
+
+        // DEBUG: Print tau vector
+        eprintln!("[JOLT] STAGE1_PRE: tau.len = {}", tau.len());
+        for (i, t) in tau.iter().enumerate() {
+            eprintln!("[JOLT] STAGE1_PRE: tau[{}] = {:?}", i, Into::<F>::into(*t));
+        }
+
         Self { tau }
     }
 }
@@ -432,7 +439,22 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let r_tail_reversed: Vec<F::Challenge> =
             sumcheck_challenges.iter().rev().copied().collect();
         let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
-        tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+
+        let result = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod;
+
+        // DEBUG: Print expected_output_claim computation details
+        eprintln!("[JOLT] STAGE1_FINAL: tau_high = {:?}", Into::<F>::into(*tau_high));
+        eprintln!("[JOLT] STAGE1_FINAL: r0 = {:?}", Into::<F>::into(self.params.r0));
+        eprintln!("[JOLT] STAGE1_FINAL: lagrange_tau_r0 (tau_high_bound_r0) = {:?}", tau_high_bound_r0);
+        eprintln!("[JOLT] STAGE1_FINAL: tau_bound_r_tail_reversed = {:?}", tau_bound_r_tail_reversed);
+        eprintln!("[JOLT] STAGE1_FINAL: inner_sum_prod (Az*Bz) = {:?}", inner_sum_prod);
+        eprintln!("[JOLT] STAGE1_FINAL: expected_output_claim = {:?}", result);
+        eprintln!("[JOLT] STAGE1_FINAL: sumcheck_challenges.len = {}", sumcheck_challenges.len());
+        for (i, c) in sumcheck_challenges.iter().enumerate() {
+            eprintln!("[JOLT] STAGE1_FINAL: sumcheck_challenge[{}] = {:?}", i, Into::<F>::into(*c));
+        }
+
+        result
     }
 
     fn cache_openings(

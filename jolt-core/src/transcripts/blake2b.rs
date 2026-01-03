@@ -111,6 +111,8 @@ impl Transcript for Blake2bTranscript {
         // We require all messages to fit into one evm word and then right pad them
         // right padding matches the format of the strings when cast to bytes 32 in solidity
         assert!(msg.len() < 33);
+        eprintln!("[JOLT TRANSCRIPT] append_message: {:?}, round={}, state_before={:02x?}",
+            std::str::from_utf8(msg).unwrap_or("?"), self.n_rounds, &self.state[..8]);
         let hasher = if msg.len() == 32 {
             self.hasher().chain_update(msg)
         } else {
@@ -120,20 +122,32 @@ impl Transcript for Blake2bTranscript {
         };
         // Instantiate hasher add our seed, position and msg
         self.update_state(hasher.finalize().into());
+        eprintln!("[JOLT TRANSCRIPT]   state_after={:02x?}", &self.state[..8]);
     }
 
     fn append_bytes(&mut self, bytes: &[u8]) {
+        eprintln!("[JOLT TRANSCRIPT] append_bytes: len={}, state_before={:02x?}", bytes.len(), &self.state[..8]);
+        if bytes.len() <= 16 {
+            eprintln!("[JOLT TRANSCRIPT]   bytes={:02x?}", bytes);
+        } else {
+            eprintln!("[JOLT TRANSCRIPT]   first 8 bytes={:02x?}", &bytes[..8]);
+            eprintln!("[JOLT TRANSCRIPT]   last 8 bytes={:02x?}", &bytes[bytes.len()-8..]);
+        }
         // Add the message and label
         let hasher = self.hasher().chain_update(bytes);
         self.update_state(hasher.finalize().into());
+        eprintln!("[JOLT TRANSCRIPT]   state_after={:02x?}", &self.state[..8]);
     }
 
     fn append_u64(&mut self, x: u64) {
+        eprintln!("[JOLT TRANSCRIPT] append_u64: value={} (0x{:x}), state_before={:02x?}", x, x, &self.state[..8]);
         // Allocate into a 32 byte region
         let mut packed = [0_u8; 24].to_vec();
         packed.append(&mut x.to_be_bytes().to_vec());
+        eprintln!("[JOLT TRANSCRIPT]   packed={:02x?}", packed);
         let hasher = self.hasher().chain_update(packed.clone());
         self.update_state(hasher.finalize().into());
+        eprintln!("[JOLT TRANSCRIPT]   state_after={:02x?}", &self.state[..8]);
     }
 
     fn append_scalar<F: JoltField>(&mut self, scalar: &F) {
@@ -149,10 +163,12 @@ impl Transcript for Blake2bTranscript {
     fn append_serializable<F: CanonicalSerialize>(&mut self, scalar: &F) {
         let mut buf = vec![];
         scalar.serialize_uncompressed(&mut buf).unwrap();
+
         // Serialize uncompressed gives the scalar in LE byte order which is not
         // a natural representation in the EVM for scalar math so we reverse
         // to get an EVM compatible version.
         buf = buf.into_iter().rev().collect();
+
         self.append_bytes(&buf);
     }
 
@@ -196,10 +212,15 @@ impl Transcript for Blake2bTranscript {
     }
 
     fn challenge_u128(&mut self) -> u128 {
+        eprintln!("[JOLT TRANSCRIPT] challenge_u128: round={}, state_before={:02x?}", self.n_rounds, self.state);
         let mut buf = vec![0u8; 16];
         self.challenge_bytes(&mut buf);
+        eprintln!("[JOLT TRANSCRIPT]   challenge_bytes={:02x?}", buf);
         buf = buf.into_iter().rev().collect();
-        u128::from_be_bytes(buf.try_into().unwrap())
+        eprintln!("[JOLT TRANSCRIPT]   reversed={:02x?}", buf);
+        let result = u128::from_be_bytes(buf.try_into().unwrap());
+        eprintln!("[JOLT TRANSCRIPT]   u128=0x{:032x}", result);
+        result
     }
 
     fn challenge_scalar<F: JoltField>(&mut self) -> F {

@@ -195,12 +195,16 @@ impl BatchedSumcheck {
             .unwrap();
 
         // Append input claims to transcript
-        sumcheck_instances.iter().for_each(|sumcheck| {
+        sumcheck_instances.iter().enumerate().for_each(|(i, sumcheck)| {
             let input_claim = sumcheck.input_claim(opening_accumulator);
+            eprintln!("[JOLT] STAGE1_PRE: input_claim[{}] = {:?}", i, input_claim);
             transcript.append_scalar(&input_claim);
         });
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
+        if !batching_coeffs.is_empty() {
+            eprintln!("[JOLT] STAGE1_PRE: batching_coeff = {:?}", batching_coeffs[0]);
+        }
 
         // To see why we may need to scale by a power of two, consider a batch of
         // two sumchecks:
@@ -217,12 +221,25 @@ impl BatchedSumcheck {
             .map(|(sumcheck, coeff)| {
                 let num_rounds = sumcheck.num_rounds();
                 let input_claim = sumcheck.input_claim(opening_accumulator);
+                #[cfg(test)]
+                eprintln!("  input_claim: {:?}, num_rounds: {}, max_num_rounds: {}, coeff: {:?}",
+                    input_claim, num_rounds, max_num_rounds, coeff);
                 input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
             })
             .sum();
 
+        #[cfg(test)]
+        eprintln!("Initial claim for sumcheck: {:?}", claim);
+
         let (output_claim, r_sumcheck) =
             proof.verify(claim, max_num_rounds, max_degree, transcript)?;
+
+        // DEBUG: Print output_claim and challenges
+        eprintln!("[JOLT] STAGE1_FINAL: output_claim = {:?}", output_claim);
+        eprintln!("[JOLT] STAGE1_FINAL: r_sumcheck.len = {}", r_sumcheck.len());
+        for (i, r) in r_sumcheck.iter().enumerate() {
+            eprintln!("[JOLT] STAGE1_FINAL: r_sumcheck[{}] = {:?}", i, Into::<F>::into(*r));
+        }
 
         let expected_output_claim = sumcheck_instances
             .iter()
@@ -245,6 +262,14 @@ impl BatchedSumcheck {
             .sum();
 
         if output_claim != expected_output_claim {
+            #[cfg(test)]
+            {
+                eprintln!("=== SUMCHECK VERIFICATION FAILED ===");
+                eprintln!("output_claim:          {:?}", output_claim);
+                eprintln!("expected_output_claim: {:?}", expected_output_claim);
+                eprintln!("r_sumcheck len: {}", r_sumcheck.len());
+                eprintln!("=====================================");
+            }
             return Err(ProofVerifyError::SumcheckVerificationError);
         }
 
@@ -293,6 +318,9 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         // verify that there is a univariate polynomial for each round
         assert_eq!(self.compressed_polys.len(), num_rounds);
+        eprintln!("[JOLT] Sumcheck verify: {} rounds, degree_bound {}", num_rounds, degree_bound);
+        eprintln!("[JOLT] STAGE1_INITIAL: claim = {:?}", claim);
+
         for i in 0..self.compressed_polys.len() {
             // verify degree bound
             if self.compressed_polys[i].degree() > degree_bound {
@@ -302,6 +330,18 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 ));
             }
 
+            // DEBUG: Print round info with byte representation
+            let coeffs = &self.compressed_polys[i].coeffs_except_linear_term;
+            eprintln!("[JOLT] STAGE1_ROUND_{}: current_claim = {:?}", i, e);
+            eprintln!("[JOLT] STAGE1_ROUND_{}: c0 = {:?}", i, coeffs[0]);
+            eprintln!("[JOLT] STAGE1_ROUND_{}: c0_bytes = {:?}", i, Self::field_to_bytes(&coeffs[0]));
+            eprintln!("[JOLT] STAGE1_ROUND_{}: c2 = {:?}", i, coeffs[1]);
+            eprintln!("[JOLT] STAGE1_ROUND_{}: c2_bytes = {:?}", i, Self::field_to_bytes(&coeffs[1]));
+            if coeffs.len() > 2 {
+                eprintln!("[JOLT] STAGE1_ROUND_{}: c3 = {:?}", i, coeffs[2]);
+                eprintln!("[JOLT] STAGE1_ROUND_{}: c3_bytes = {:?}", i, Self::field_to_bytes(&coeffs[2]));
+            }
+
             // append the prover's message to the transcript
             self.compressed_polys[i].append_to_transcript(transcript);
 
@@ -309,10 +349,24 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             let r_i: F::Challenge = transcript.challenge_scalar_optimized::<F>();
             r.push(r_i);
 
-            // evaluate the claimed degree-ell polynomial at r_i using the hint
-            e = self.compressed_polys[i].eval_from_hint(&e, &r_i);
-        }
+            // DEBUG: Print challenge with bytes
+            let r_i_field: F = r_i.into();
+            eprintln!("[JOLT] STAGE1_ROUND_{}: challenge = {:?}", i, r_i_field);
+            eprintln!("[JOLT] STAGE1_ROUND_{}: challenge_bytes = {:?}", i, Self::field_to_bytes(&r_i_field));
 
+            // evaluate the claimed degree-ell polynomial at r_i using the hint
+            let new_e = self.compressed_polys[i].eval_from_hint(&e, &r_i);
+            eprintln!("[JOLT] STAGE1_ROUND_{}: next_claim = {:?}", i, new_e);
+            e = new_e;
+        }
         Ok((e, r))
+    }
+
+    /// Helper to convert field element to bytes for debugging
+    fn field_to_bytes(f: &F) -> Vec<u8> {
+        use ark_serialize::CanonicalSerialize;
+        let mut bytes = Vec::new();
+        f.serialize_compressed(&mut bytes).unwrap();
+        bytes
     }
 }
