@@ -246,6 +246,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterUniSkipP
 
         let tau_high = self.params.tau[self.params.tau.len() - 1];
 
+        // DEBUG: Print extended_evals
+        eprintln!("[JOLT STAGE1] extended_evals:");
+        for (j, eval) in extended_evals.iter().enumerate() {
+            eprintln!("  [{}] = {:?}", j, eval);
+        }
+        eprintln!("[JOLT STAGE1] tau_high = {:?}", tau_high);
+
         // Compute the univariate-skip first round polynomial s1(Y) = L(τ_high, Y) · t1(Y)
         let uni_poly = build_uniskip_first_round_poly::<
             F,
@@ -254,6 +261,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterUniSkipP
             OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE,
             OUTER_FIRST_ROUND_POLY_NUM_COEFFS,
         >(None, extended_evals, tau_high);
+
+        // DEBUG: Print first few coefficients
+        eprintln!("[JOLT STAGE1] uni_poly coeffs (first 5):");
+        for (j, coeff) in uni_poly.coeffs.iter().enumerate().take(5) {
+            eprintln!("  [{}] = {:?}", j, coeff);
+        }
 
         self.uni_poly = Some(uni_poly.clone());
         uni_poly
@@ -421,6 +434,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                 .get_virtual_polynomial_opening((&input).into(), SumcheckId::SpartanOuter)
                 .1
         });
+
+        // DEBUG: Print first few r1cs_input_evals
+        eprintln!("[JOLT] STAGE1_FINAL: r1cs_input_evals[0] (LeftInstructionInput) = {:?}", r1cs_input_evals[0]);
+        eprintln!("[JOLT] STAGE1_FINAL: r1cs_input_evals[1] (RightInstructionInput) = {:?}", r1cs_input_evals[1]);
+        eprintln!("[JOLT] STAGE1_FINAL: r1cs_input_evals[2] (Product) = {:?}", r1cs_input_evals[2]);
+        eprintln!("[JOLT] STAGE1_FINAL: r1cs_input_evals[6] (PC) = {:?}", r1cs_input_evals[6]);
+        eprintln!("[JOLT] STAGE1_FINAL: r1cs_input_evals[7] (UnexpandedPC) = {:?}", r1cs_input_evals[7]);
 
         // Randomness used to bind the rows of R1CS matrices A,B.
         let rx_constr = &[sumcheck_challenges[0], self.params.r0];

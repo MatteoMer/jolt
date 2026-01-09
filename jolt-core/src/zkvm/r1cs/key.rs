@@ -84,6 +84,16 @@ impl<F: JoltField> UniformSpartanKey<F> {
         let w =
             LagrangePolynomial::<F>::evals::<F::Challenge, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE>(&r0);
 
+        // DEBUG: Print Lagrange weights
+        eprintln!("[JOLT] inner_sum_prod: r_stream = {:?}", Into::<F>::into(r_stream));
+        eprintln!("[JOLT] inner_sum_prod: r0 = {:?}", Into::<F>::into(r0));
+        for (i, wi) in w.iter().enumerate() {
+            eprintln!("[JOLT] inner_sum_prod: w[{}] = {:?}", i, wi);
+        }
+        eprintln!("[JOLT] inner_sum_prod: r1cs_input_evals[0] = {:?}", r1cs_input_evals[0]);
+        eprintln!("[JOLT] inner_sum_prod: r1cs_input_evals[1] = {:?}", r1cs_input_evals[1]);
+        eprintln!("[JOLT] inner_sum_prod: r1cs_input_evals[2] = {:?}", r1cs_input_evals[2]);
+
         // Build z(r_cycle) vector with a trailing 1 for the constant column
         let z_const_col = JoltR1CSInputs::num_inputs();
         let mut z = r1cs_input_evals.to_vec();
@@ -113,9 +123,19 @@ impl<F: JoltField> UniformSpartanKey<F> {
             bz_g1 += w[i] * lc_b.dot_product::<F>(&z, z_const_col);
         }
 
+        // DEBUG: Print intermediate Az, Bz values
+        eprintln!("[JOLT] inner_sum_prod: az_g0 = {:?}", az_g0);
+        eprintln!("[JOLT] inner_sum_prod: bz_g0 = {:?}", bz_g0);
+        eprintln!("[JOLT] inner_sum_prod: az_g1 = {:?}", az_g1);
+        eprintln!("[JOLT] inner_sum_prod: bz_g1 = {:?}", bz_g1);
+
         // Bind by r_stream to match the outer streaming combination used for final Az,Bz
         let az_final = az_g0 + r_stream * (az_g1 - az_g0);
         let bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0);
+
+        eprintln!("[JOLT] inner_sum_prod: az_final = {:?}", az_final);
+        eprintln!("[JOLT] inner_sum_prod: bz_final = {:?}", bz_final);
+        eprintln!("[JOLT] inner_sum_prod: product = {:?}", az_final * bz_final);
 
         az_final * bz_final
     }

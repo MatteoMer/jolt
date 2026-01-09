@@ -114,6 +114,14 @@ pub fn build_uniskip_first_round_poly<
     let lagrange_coeffs =
         LagrangePolynomial::<F>::interpolate_coeffs::<DOMAIN_SIZE>(&lagrange_values);
 
+    // Debug output
+    eprintln!("[JOLT] build_uniskip_first_round_poly:");
+    eprintln!("[JOLT] tau_high = {:?}", tau_high);
+    eprintln!("[JOLT] lagrange_values (L_i(tau_high)):");
+    for (i, val) in lagrange_values.iter().enumerate() {
+        eprintln!("  [{}] = {:?}", i, val);
+    }
+
     let mut s1_coeffs: [F; NUM_COEFFS] = [F::zero(); NUM_COEFFS];
     for (i, &a) in lagrange_coeffs.iter().enumerate() {
         for (j, &b) in t1_coeffs.iter().enumerate() {
@@ -178,15 +186,25 @@ impl<F: JoltField, T: Transcript> UniSkipFirstRoundProof<F, T> {
             ));
         }
 
+        // Debug: print received UniSkip coefficients
+        eprintln!("[JOLT UNISKIP VERIFY] Received {} coefficients:", proof.uni_poly.coeffs.len());
+        for (i, coeff) in proof.uni_poly.coeffs.iter().enumerate() {
+            eprintln!("[JOLT UNISKIP VERIFY]   coeff[{}] = {:?}", i, coeff);
+        }
+
         // Append full polynomial and derive r0
         proof.uni_poly.append_to_transcript(transcript);
         let r0 = transcript.challenge_scalar_optimized::<F>();
+        eprintln!("[JOLT UNISKIP VERIFY] r0 (after append) = {:?}", Into::<F>::into(r0));
 
         // Check symmetric-domain sum equals zero (initial claim), and compute next claim s1(r0)
         let input_claim = sumcheck_instance.input_claim(opening_accumulator);
+        eprintln!("[JOLT UNISKIP VERIFY] input_claim = {:?}", input_claim);
+
         let ok = proof
             .uni_poly
             .check_sum_evals::<N, FIRST_ROUND_POLY_NUM_COEFFS>(input_claim);
+        eprintln!("[JOLT UNISKIP VERIFY] check_sum_evals ok = {}", ok);
         sumcheck_instance.cache_openings(opening_accumulator, transcript, &[r0]);
 
         if !ok {
