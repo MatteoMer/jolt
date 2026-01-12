@@ -73,11 +73,23 @@ impl<F: JoltField> RegistersReadWriteCheckingParams<F> {
         opening_accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
     ) -> Self {
+        use ark_serialize::CanonicalSerialize;
+
         let gamma = transcript.challenge_scalar::<F>();
         let (r_cycle, _) = opening_accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::RdWriteValue,
             SumcheckId::RegistersClaimReduction,
         );
+
+        // DEBUG: Print what we got from the accumulator
+        println!("[JOLT STAGE4 PARAMS] r_cycle from accumulator.len = {}", r_cycle.len());
+        for (i, p) in r_cycle.r.iter().enumerate() {
+            let f: F = (*p).into();
+            let mut bytes = vec![];
+            f.serialize_compressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE4 PARAMS]   r_cycle[{}] = {:02x?}", i, &bytes[..8]);
+        }
+
         Self {
             gamma,
             T: trace_length,
@@ -121,7 +133,24 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
         // TODO: Make error and move to more appropriate place.
         assert_eq!(rs2_rv_claim, rs2_rv_claim_instruction_input);
 
-        rd_wv_claim + self.gamma * (rs1_rv_claim + self.gamma * rs2_rv_claim)
+        let result = rd_wv_claim + self.gamma * (rs1_rv_claim + self.gamma * rs2_rv_claim);
+
+        // DEBUG: Print input_claim components
+        use ark_serialize::CanonicalSerialize;
+        let mut rd_bytes = vec![];
+        rd_wv_claim.serialize_compressed(&mut rd_bytes).unwrap();
+        let mut rs1_bytes = vec![];
+        rs1_rv_claim.serialize_compressed(&mut rs1_bytes).unwrap();
+        let mut rs2_bytes = vec![];
+        rs2_rv_claim.serialize_compressed(&mut rs2_bytes).unwrap();
+        let mut result_bytes = vec![];
+        result.serialize_compressed(&mut result_bytes).unwrap();
+        println!("[JOLT STAGE4 INPUT_CLAIM] rd_wv_claim = {:02x?}", &rd_bytes[..8]);
+        println!("[JOLT STAGE4 INPUT_CLAIM] rs1_rv_claim = {:02x?}", &rs1_bytes[..8]);
+        println!("[JOLT STAGE4 INPUT_CLAIM] rs2_rv_claim = {:02x?}", &rs2_bytes[..8]);
+        println!("[JOLT STAGE4 INPUT_CLAIM] result = {:02x?}", &result_bytes[..8]);
+
+        result
     }
 
     // Invariant: we want big-endian, with address variables being "higher" than cycle variables
@@ -131,6 +160,9 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
     ) -> OpeningPoint<BIG_ENDIAN, F> {
         let phase1_num_rounds = phase1_num_rounds(self.T);
         let phase2_num_rounds = phase2_num_rounds(self.T);
+
+        println!("[NORMALIZE] T = {}, phase1_num_rounds = {}, phase2_num_rounds = {}", self.T, phase1_num_rounds, phase2_num_rounds);
+        println!("[NORMALIZE] sumcheck_challenges.len = {}", sumcheck_challenges.len());
 
         // Cycle variables are bound low-to-high in phase 1
         let (phase1_challenges, sumcheck_challenges) =
@@ -142,6 +174,11 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
         // bound low-to-high in phase 3
         let (phase3_cycle_challenges, phase3_address_challenges) =
             sumcheck_challenges.split_at(self.T.log_2() - phase1_num_rounds);
+
+        println!("[NORMALIZE] phase1_challenges.len = {}", phase1_challenges.len());
+        println!("[NORMALIZE] phase2_challenges.len = {}", phase2_challenges.len());
+        println!("[NORMALIZE] phase3_cycle_challenges.len = {}", phase3_cycle_challenges.len());
+        println!("[NORMALIZE] phase3_address_challenges.len = {}", phase3_address_challenges.len());
 
         // Both Phase 1/2 (GruenSplitEqPolynomial LowToHigh) and Phase 3 (dense LowToHigh)
         // bind variables from the "bottom" (last w component) to "top" (first w component).
@@ -159,7 +196,20 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
             .chain(phase2_challenges.iter().rev().copied())
             .collect();
 
-        [r_address, r_cycle].concat().into()
+        println!("[NORMALIZE] r_cycle.len = {}", r_cycle.len());
+        println!("[NORMALIZE] r_address.len = {}", r_address.len());
+        use ark_serialize::CanonicalSerialize;
+        for (i, c) in r_cycle.iter().enumerate() {
+            let f: F = (*c).into();
+            let mut bytes = vec![];
+            f.serialize_compressed(&mut bytes).unwrap();
+            println!("[NORMALIZE]   r_cycle[{}] = {:02x?}", i, &bytes[..8]);
+        }
+
+        let result: OpeningPoint<BIG_ENDIAN, F> = [r_address, r_cycle].concat().into();
+        println!("[NORMALIZE] result.len = {}", result.len());
+
+        result
     }
 }
 
@@ -779,13 +829,62 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             SumcheckId::RegistersReadWriteChecking,
         );
 
+        // DEBUG: Print all values used in expected_output_claim
+        use ark_serialize::CanonicalSerialize;
+        println!("[JOLT STAGE4 DEBUG] expected_output_claim computation:");
+        println!("[JOLT STAGE4 DEBUG] sumcheck_challenges.len = {}", sumcheck_challenges.len());
+        for (i, c) in sumcheck_challenges.iter().enumerate() {
+            let f: F = (*c).into();
+            let mut bytes = vec![];
+            f.serialize_compressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE4 DEBUG]   sumcheck_challenges[{}] = {:02x?}", i, &bytes[..8]);
+        }
+        println!("[JOLT STAGE4 DEBUG] params ptr addr = {:p}", &self.params);
+        // Print params.r_cycle before normalize
+        println!("[JOLT STAGE4 DEBUG] params.r_cycle (stored) len = {}", self.params.r_cycle.len());
+        for (i, p) in self.params.r_cycle.r.iter().enumerate() {
+            let f: F = (*p).into();
+            let mut bytes = vec![];
+            f.serialize_compressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE4 DEBUG]   params.r_cycle_stored[{}] = {:02x?}", i, &bytes[..8]);
+        }
+        println!("[JOLT STAGE4 DEBUG]   val_claim = {:?}", val_claim);
+        println!("[JOLT STAGE4 DEBUG]   rs1_ra_claim = {:?}", rs1_ra_claim);
+        println!("[JOLT STAGE4 DEBUG]   rs2_ra_claim = {:?}", rs2_ra_claim);
+        println!("[JOLT STAGE4 DEBUG]   rd_wa_claim = {:?}", rd_wa_claim);
+        println!("[JOLT STAGE4 DEBUG]   inc_claim = {:?}", inc_claim);
+        println!("[JOLT STAGE4 DEBUG]   gamma = {:?}", self.params.gamma);
+        println!("[JOLT STAGE4 DEBUG]   r_cycle.len = {}", r_cycle.len());
+        println!("[JOLT STAGE4 DEBUG]   params.r_cycle.len = {}", self.params.r_cycle.len());
+
+        // Print r_cycle values
+        for (i, rc) in r_cycle.r.iter().enumerate() {
+            let mut bytes = vec![];
+            rc.serialize_compressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE4 DEBUG]   r_cycle[{}] = {:02x?}", i, &bytes[..8]);
+        }
+        for (i, rc) in self.params.r_cycle.r.iter().enumerate() {
+            let mut bytes = vec![];
+            rc.serialize_compressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE4 DEBUG]   params.r_cycle[{}] = {:02x?}", i, &bytes[..8]);
+        }
+
         let rd_write_value_claim = rd_wa_claim * (inc_claim + val_claim);
         let rs1_value_claim = rs1_ra_claim * val_claim;
         let rs2_value_claim = rs2_ra_claim * val_claim;
 
-        EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle)
-            * (rd_write_value_claim
-                + self.params.gamma * (rs1_value_claim + self.params.gamma * rs2_value_claim))
+        let eq_val = EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle);
+        let combined = rd_write_value_claim
+            + self.params.gamma * (rs1_value_claim + self.params.gamma * rs2_value_claim);
+
+        println!("[JOLT STAGE4 DEBUG]   rd_write_value_claim = {:?}", rd_write_value_claim);
+        println!("[JOLT STAGE4 DEBUG]   rs1_value_claim = {:?}", rs1_value_claim);
+        println!("[JOLT STAGE4 DEBUG]   rs2_value_claim = {:?}", rs2_value_claim);
+        println!("[JOLT STAGE4 DEBUG]   eq_val = {:?}", eq_val);
+        println!("[JOLT STAGE4 DEBUG]   combined = {:?}", combined);
+        println!("[JOLT STAGE4 DEBUG]   expected = {:?}", eq_val * combined);
+
+        eq_val * combined
     }
 
     fn cache_openings(

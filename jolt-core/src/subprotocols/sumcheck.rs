@@ -244,7 +244,8 @@ impl BatchedSumcheck {
         let expected_output_claim = sumcheck_instances
             .iter()
             .zip(batching_coeffs.iter())
-            .map(|(sumcheck, coeff)| {
+            .enumerate()
+            .map(|(idx, (sumcheck, coeff))| {
                 // If a sumcheck instance has fewer than `max_num_rounds`,
                 // we wait until there are <= `sumcheck.num_rounds()` left
                 // before binding its variables.
@@ -257,9 +258,15 @@ impl BatchedSumcheck {
                 sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
                 let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
 
+                eprintln!("[JOLT BATCHED] Instance {} expected_claim = {:?}, coeff = {:?}, weighted = {:?}",
+                    idx, claim, coeff, claim * coeff);
+
                 claim * coeff
             })
             .sum();
+
+        eprintln!("[JOLT BATCHED] output_claim = {:?}", output_claim);
+        eprintln!("[JOLT BATCHED] expected_output_claim (sum) = {:?}", expected_output_claim);
 
         if output_claim != expected_output_claim {
             #[cfg(test)]

@@ -248,11 +248,21 @@ mod tests {
 
         type PreprocessingType = JoltVerifierPreprocessing<ark_bn254::Fr, DoryCommitmentScheme>;
 
-        let preprocessing_path = "/tmp/zolt_preprocessing.bin";
-        let proof_path = "/tmp/zolt_proof_dory.bin";
+        // Try local logs dir first, then fall back to /tmp
+        let logs_dir = std::env::var("ZOLT_LOGS_DIR").unwrap_or_else(|_| {
+            // Look for ../zolt/logs relative to jolt repo
+            let local_logs = std::path::Path::new("../zolt/logs");
+            if local_logs.exists() {
+                local_logs.to_string_lossy().to_string()
+            } else {
+                "/tmp".to_string()
+            }
+        });
+        let preprocessing_path = format!("{}/zolt_preprocessing.bin", logs_dir);
+        let proof_path = format!("{}/zolt_proof_dory.bin", logs_dir);
 
         // Check files exist
-        for path in [preprocessing_path, proof_path] {
+        for path in [preprocessing_path.as_str(), proof_path.as_str()] {
             if !Path::new(path).exists() {
                 println!("Missing required file: {}", path);
                 println!("\nGenerate with:");
