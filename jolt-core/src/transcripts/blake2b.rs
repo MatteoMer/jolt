@@ -229,8 +229,11 @@ impl Transcript for Blake2bTranscript {
     }
 
     fn challenge_scalar_128_bits<F: JoltField>(&mut self) -> F {
+        eprintln!("[JOLT TRANSCRIPT] challenge_scalar_128_bits: state_before={:02x?}", &self.state[..8]);
         let mut buf = vec![0u8; 16];
         self.challenge_bytes(&mut buf);
+        eprintln!("[JOLT TRANSCRIPT] challenge_scalar_128_bits: state_after={:02x?}", &self.state[..8]);
+        eprintln!("[JOLT TRANSCRIPT] challenge_scalar_128_bits: buf_before_rev={:02x?}", &buf[..8]);
 
         buf = buf.into_iter().rev().collect();
         F::from_bytes(&buf)

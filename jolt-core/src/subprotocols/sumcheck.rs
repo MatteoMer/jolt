@@ -195,14 +195,22 @@ impl BatchedSumcheck {
             .unwrap();
 
         // Append input claims to transcript
+        eprintln!("[JOLT BATCHED] About to append {} input claims", sumcheck_instances.len());
         sumcheck_instances.iter().enumerate().for_each(|(i, sumcheck)| {
             let input_claim = sumcheck.input_claim(opening_accumulator);
+            let mut claim_bytes = vec![];
+            input_claim.serialize_uncompressed(&mut claim_bytes).unwrap();
+            eprintln!("[JOLT BATCHED] input_claim[{}] bytes = {:02x?}", i, &claim_bytes[..std::cmp::min(16, claim_bytes.len())]);
             eprintln!("[JOLT] STAGE1_PRE: input_claim[{}] = {:?}", i, input_claim);
             transcript.append_scalar(&input_claim);
         });
+        eprintln!("[JOLT BATCHED] Finished appending input claims, sampling batching_coeffs");
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
         if !batching_coeffs.is_empty() {
+            let mut coeff_bytes = vec![];
+            batching_coeffs[0].serialize_uncompressed(&mut coeff_bytes).unwrap();
+            eprintln!("[JOLT BATCHED] batching_coeff[0] bytes = {:02x?}", &coeff_bytes[..std::cmp::min(16, coeff_bytes.len())]);
             eprintln!("[JOLT] STAGE1_PRE: batching_coeff = {:?}", batching_coeffs[0]);
         }
 

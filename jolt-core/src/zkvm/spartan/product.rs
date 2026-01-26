@@ -354,10 +354,15 @@ impl<F: JoltField> ProductVirtualRemainderParams<F> {
         uni_skip_params: ProductVirtualUniSkipParams<F>,
         opening_accumulator: &dyn OpeningAccumulator<F>,
     ) -> Self {
-        let (r_uni_skip, _) = opening_accumulator.get_virtual_polynomial_opening(
+        let (r_uni_skip, uni_skip_claim) = opening_accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::UnivariateSkip,
             SumcheckId::SpartanProductVirtualization,
         );
+        eprintln!("[JOLT PRODUCT PARAMS] r_uni_skip.len() = {}", r_uni_skip.len());
+        eprintln!("[JOLT PRODUCT PARAMS] uni_skip_claim = {:?}", uni_skip_claim);
+        for (i, r) in r_uni_skip.r.iter().enumerate() {
+            eprintln!("[JOLT PRODUCT PARAMS] r_uni_skip[{}] = {:?}", i, Into::<F>::into(*r));
+        }
         debug_assert_eq!(r_uni_skip.len(), 1);
         let r0 = r_uni_skip[0];
 
@@ -723,6 +728,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                 SumcheckId::SpartanProductVirtualization,
             )
             .1;
+
+        eprintln!("[JOLT PRODUCT] factor[0] l_inst = {:?}", l_inst);
+        eprintln!("[JOLT PRODUCT] factor[1] r_inst = {:?}", r_inst);
+        eprintln!("[JOLT PRODUCT] factor[2] is_rd_not_zero = {:?}", is_rd_not_zero);
+        eprintln!("[JOLT PRODUCT] factor[3] wl_flag = {:?}", wl_flag);
+        eprintln!("[JOLT PRODUCT] factor[4] j_flag = {:?}", j_flag);
+        eprintln!("[JOLT PRODUCT] factor[5] lookup_out = {:?}", lookup_out);
+        eprintln!("[JOLT PRODUCT] factor[6] branch_flag = {:?}", branch_flag);
+        eprintln!("[JOLT PRODUCT] factor[7] next_is_noop = {:?}", next_is_noop);
+        eprintln!("[JOLT PRODUCT] r0 (Challenge) = {:?}", self.params.r0);
+        eprintln!("[JOLT PRODUCT] r0 (as F) = {:?}", Into::<F>::into(self.params.r0));
+        eprintln!("[JOLT PRODUCT] w = {:?}", w);
 
         let fused_left = w[0] * l_inst
             + w[1] * is_rd_not_zero

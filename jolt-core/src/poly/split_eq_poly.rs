@@ -103,6 +103,46 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
                     || EqPolynomial::evals_cached(w_out),
                     || EqPolynomial::evals_cached(w_in),
                 );
+                // Debug: Print E_out and E_in table details for comparison with Zolt
+                {
+                    use ark_serialize::CanonicalSerialize;
+                    println!("\n[JOLT GRUEN_INIT] GruenSplitEqPolynomial structure:");
+                    println!("[JOLT GRUEN_INIT]   n={}, m={}", w.len(), m);
+                    println!("[JOLT GRUEN_INIT]   w_out = w[0..{}]", m);
+                    println!("[JOLT GRUEN_INIT]   w_in = w[{}..{}]", m, w.len() - 1);
+                    println!("[JOLT GRUEN_INIT]   w_last = w[{}]", w.len() - 1);
+
+                    let E_out = E_out_vec.last().unwrap();
+                    let E_in = E_in_vec.last().unwrap();
+
+                    println!("[JOLT GRUEN_INIT]   E_out.len={}, E_in.len={}", E_out.len(), E_in.len());
+
+                    // Print first 4 E_out entries
+                    println!("[JOLT GRUEN_INIT]   E_out[0..min(4, len)]:");
+                    for i in 0..std::cmp::min(4, E_out.len()) {
+                        let mut bytes = [0u8; 32];
+                        E_out[i].serialize_compressed(&mut bytes[..]).unwrap();
+                        println!("[JOLT GRUEN_INIT]     E_out[{}] = {:?}", i, bytes);
+                    }
+
+                    // Print first 4 E_in entries
+                    println!("[JOLT GRUEN_INIT]   E_in[0..min(4, len)]:");
+                    for i in 0..std::cmp::min(4, E_in.len()) {
+                        let mut bytes = [0u8; 32];
+                        E_in[i].serialize_compressed(&mut bytes[..]).unwrap();
+                        println!("[JOLT GRUEN_INIT]     E_in[{}] = {:?}", i, bytes);
+                    }
+
+                    // Print current_scalar and w_last
+                    let scalar = scaling_factor.unwrap_or(F::one());
+                    let mut bytes = [0u8; 32];
+                    scalar.serialize_compressed(&mut bytes[..]).unwrap();
+                    println!("[JOLT GRUEN_INIT]   current_scalar = {:?}", bytes);
+                    let w_last: F = w[w.len() - 1].into();
+                    w_last.serialize_compressed(&mut bytes[..]).unwrap();
+                    println!("[JOLT GRUEN_INIT]   current_w (w_last) = {:?}", bytes);
+                }
+
                 Self {
                     current_index: w.len(),
                     current_scalar: scaling_factor.unwrap_or(F::one()),
@@ -385,6 +425,20 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
                 BindingOrder::HighToLow => self.w[self.current_index],
             };
         let eq_eval_0 = self.current_scalar - eq_eval_1;
+
+        // Debug Round 0 only (when current_index hasn't decremented yet)
+        if self.current_index == self.w.len() {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 8];
+            eq_eval_0.serialize_compressed(&mut bytes[..]).unwrap();
+            println!("[JOLT gruenPolyDeg3] eq_eval_0={:?}", bytes);
+            eq_eval_1.serialize_compressed(&mut bytes[..]).unwrap();
+            println!("[JOLT gruenPolyDeg3] eq_eval_1={:?}", bytes);
+            q_constant.serialize_compressed(&mut bytes[..]).unwrap();
+            println!("[JOLT gruenPolyDeg3] q_constant={:?}", bytes);
+            q_quadratic_coeff.serialize_compressed(&mut bytes[..]).unwrap();
+            println!("[JOLT gruenPolyDeg3] q_quadratic_coeff={:?}", bytes);
+        }
         let eq_m = eq_eval_1 - eq_eval_0;
         let eq_eval_2 = eq_eval_1 + eq_m;
         let eq_eval_3 = eq_eval_2 + eq_m;

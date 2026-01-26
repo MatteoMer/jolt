@@ -466,25 +466,25 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
+        // Debug: Print Stage 3 challenges before normalization
         use ark_serialize::CanonicalSerialize;
-
-        println!("[JOLT STAGE3 DEBUG] cache_openings called with {} challenges", sumcheck_challenges.len());
+        println!("[JOLT STAGE3 CACHE] sumcheck_challenges.len = {}", sumcheck_challenges.len());
         for (i, c) in sumcheck_challenges.iter().enumerate() {
             let f: F = (*c).into();
             let mut bytes = vec![];
-            f.serialize_compressed(&mut bytes).unwrap();
-            println!("[JOLT STAGE3 DEBUG]   challenge[{}] = {:02x?}", i, &bytes[..8]);
+            f.serialize_uncompressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE3 CACHE]   challenge[{}] = {:02x?}", i, &bytes[..8]);
         }
 
         let opening_point = SumcheckInstanceVerifier::<F, T>::get_params(self)
             .normalize_opening_point(sumcheck_challenges);
 
-        println!("[JOLT STAGE3 DEBUG] normalized opening_point.len = {}", opening_point.len());
+        println!("[JOLT STAGE3 CACHE] normalized opening_point.len = {}", opening_point.len());
         for (i, p) in opening_point.r.iter().enumerate() {
-            let f: F = (*p).into(); // Convert Challenge to F for consistent serialization
+            let f: F = (*p).into();
             let mut bytes = vec![];
-            f.serialize_compressed(&mut bytes).unwrap();
-            println!("[JOLT STAGE3 DEBUG]   opening_point[{}] = {:02x?}", i, &bytes[..8]);
+            f.serialize_uncompressed(&mut bytes).unwrap();
+            println!("[JOLT STAGE3 CACHE]   opening_point[{}] = {:02x?}", i, &bytes[..8]);
         }
 
         accumulator.append_virtual(

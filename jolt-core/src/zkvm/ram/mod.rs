@@ -281,6 +281,8 @@ pub fn verifier_accumulate_advice<F: JoltField>(
     transcript: &mut impl Transcript,
     single_opening: bool,
 ) {
+    eprintln!("[JOLT STAGE4 ADVICE] has_untrusted_advice_commitment={}, has_trusted_advice_commitment={}",
+        has_untrusted_advice_commitment, has_trusted_advice_commitment);
     let total_vars = ram_K.log_2();
 
     // Get r_address_rw from RamVal/RamReadWriteChecking (used by ValEvaluation)

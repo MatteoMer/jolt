@@ -594,13 +594,13 @@ mod tests {
 
         use crate::poly::commitment::dory::DoryGlobals;
 
-        // Generate SRS with 3 variables (8 coefficients, 4 G1 + 2 G2 points)
-        // Must match the debug test which uses max_num_vars=3
-        let max_num_vars = 3;
+        // Generate SRS with 16 variables (65536 coefficients)
+        // This is enough for Jolt's typical use cases
+        let max_num_vars = 16;
         println!("Generating Dory SRS with max_num_vars = {}", max_num_vars);
 
-        // Initialize DoryGlobals with K=1 polynomial, T=8 coefficients
-        let _guard = DoryGlobals::initialize(1, 8);
+        // Initialize DoryGlobals with K=1 polynomial, T=65536 coefficients
+        let _guard = DoryGlobals::initialize(1, 1 << max_num_vars);
 
         let prover_setup: ArkworksProverSetup = DoryCommitmentScheme::setup_prover(max_num_vars);
 
@@ -845,4 +845,5 @@ mod tests {
 
         println!("\nExported debug info to {}", output_path);
     }
+
 }
