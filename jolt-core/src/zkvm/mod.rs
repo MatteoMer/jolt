@@ -207,6 +207,13 @@ pub trait Serializable: CanonicalSerialize + CanonicalDeserialize + Sized {
             ark_serialize::Validate::No,
         )?)
     }
+
+    /// Deserializes data from bytes in uncompressed format
+    /// Use this for Zolt-generated proofs which use uncompressed serialization
+    fn deserialize_from_bytes_uncompressed(bytes: &[u8]) -> Result<Self> {
+        let cursor = Cursor::new(bytes);
+        Ok(Self::deserialize_uncompressed(cursor)?)
+    }
 }
 
 impl Serializable for RV64IMACProof {}

@@ -273,14 +273,16 @@ mod tests {
             }
         }
 
-        // Load preprocessing
-        let preprocessing_bytes = fs::read(preprocessing_path)
+        // Load preprocessing (uses compressed format, same as Jolt)
+        let preprocessing_bytes = fs::read(&preprocessing_path)
             .expect("Failed to read preprocessing");
+        println!("Loading preprocessing from: {}", preprocessing_path);
         let preprocessing = PreprocessingType::deserialize_from_bytes(&preprocessing_bytes)
             .expect("Failed to deserialize preprocessing");
 
-        // Load proof
-        let proof_bytes = fs::read(proof_path).expect("Failed to read proof");
+        // Load proof - try compressed (default) deserialization
+        let proof_bytes = fs::read(&proof_path).expect("Failed to read proof");
+        println!("Loading proof from: {}, {} bytes", proof_path, proof_bytes.len());
         let proof = RV64IMACProof::deserialize_from_bytes(&proof_bytes)
             .expect("Failed to deserialize proof");
 
@@ -513,8 +515,417 @@ mod tests {
 
                 println!("\nAfter commitments, offset = {}", offset);
                 println!("Remaining bytes: {}", proof_bytes.len() - offset);
+
+                // Parse sumcheck proofs
+                // Stage 1 UniSkip
+                if offset + 8 <= proof_bytes.len() {
+                    let len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                    let uni_len = u64::from_le_bytes(len_bytes) as usize;
+                    println!("\nStage 1 UniSkip coeffs: {}", uni_len);
+                    offset += 8;
+                    if uni_len > 0 && uni_len < 1000 {
+                        offset += uni_len * 32;
+                        println!("  After Stage 1 UniSkip: offset = {}", offset);
+                    }
+                }
+
+                // Stage 1 Sumcheck
+                if offset + 8 <= proof_bytes.len() {
+                    let len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                    let rounds = u64::from_le_bytes(len_bytes) as usize;
+                    println!("Stage 1 Sumcheck rounds: {}", rounds);
+                    offset += 8;
+
+                    for r in 0..rounds {
+                        if offset + 8 > proof_bytes.len() {
+                            println!("  Ran out of bytes at round {}", r);
+                            break;
+                        }
+                        let coeff_len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                        let coeff_len = u64::from_le_bytes(coeff_len_bytes) as usize;
+                        if r < 3 {
+                            println!("  Round {}: {} coeffs", r, coeff_len);
+                        }
+                        offset += 8;
+                        offset += coeff_len * 32;
+                    }
+                    println!("  After Stage 1 Sumcheck: offset = {}", offset);
+                }
+
+                // Stage 2 UniSkip
+                if offset + 8 <= proof_bytes.len() {
+                    let len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                    let uni_len = u64::from_le_bytes(len_bytes) as usize;
+                    println!("Stage 2 UniSkip coeffs: {}", uni_len);
+                    offset += 8;
+                    if uni_len > 0 && uni_len < 1000 {
+                        offset += uni_len * 32;
+                        println!("  After Stage 2 UniSkip: offset = {}", offset);
+                    }
+                }
+
+                // Stage 2 Sumcheck
+                if offset + 8 <= proof_bytes.len() {
+                    let len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                    let rounds = u64::from_le_bytes(len_bytes) as usize;
+                    println!("Stage 2 Sumcheck rounds: {}", rounds);
+                    offset += 8;
+
+                    for r in 0..rounds {
+                        if offset + 8 > proof_bytes.len() {
+                            println!("  Ran out of bytes at round {}", r);
+                            break;
+                        }
+                        let coeff_len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                        let coeff_len = u64::from_le_bytes(coeff_len_bytes) as usize;
+                        if r < 3 {
+                            println!("  Round {}: {} coeffs", r, coeff_len);
+                        }
+                        offset += 8;
+                        offset += coeff_len * 32;
+                    }
+                    println!("  After Stage 2 Sumcheck: offset = {}", offset);
+                }
+
+                // Stages 3-7 (no uniskip)
+                for stage in 3..=7 {
+                    if offset + 8 <= proof_bytes.len() {
+                        let len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                        let rounds = u64::from_le_bytes(len_bytes) as usize;
+                        println!("Stage {} Sumcheck rounds: {}", stage, rounds);
+                        offset += 8;
+
+                        for r in 0..rounds {
+                            if offset + 8 > proof_bytes.len() {
+                                println!("  Ran out of bytes at round {}", r);
+                                break;
+                            }
+                            let coeff_len_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                            let coeff_len = u64::from_le_bytes(coeff_len_bytes) as usize;
+                            if r == 0 {
+                                println!("  Round 0: {} coeffs", coeff_len);
+                            }
+                            offset += 8;
+                            offset += coeff_len * 32;
+                        }
+                        println!("  After Stage {} Sumcheck: offset = {}", stage, offset);
+                    }
+                }
+
+                println!("\nAfter all sumchecks, offset = {}", offset);
+                println!("Remaining bytes: {}", proof_bytes.len() - offset);
+
+                // Joint opening proof (Dory) - try to parse it
+                // Format: VMV(c:GT, d2:GT, e1:G1), num_rounds:u32, first_msgs, second_msgs, final, nu:u32, sigma:u32
+                if offset + 384 <= proof_bytes.len() {
+                    println!("\n=== Dory Opening Proof ===");
+                    // VMV c (GT = Fq12 = 384 bytes)
+                    let vmv_c = &proof_bytes[offset..offset+384];
+                    use ark_bn254::Fq12;
+                    match Fq12::deserialize_uncompressed(vmv_c) {
+                        Ok(_) => println!("VMV.c (GT): valid"),
+                        Err(e) => println!("VMV.c (GT): INVALID - {:?}", e),
+                    }
+                    offset += 384;
+
+                    // VMV d2 (GT = 384 bytes)
+                    if offset + 384 <= proof_bytes.len() {
+                        let vmv_d2 = &proof_bytes[offset..offset+384];
+                        match Fq12::deserialize_uncompressed(vmv_d2) {
+                            Ok(_) => println!("VMV.d2 (GT): valid"),
+                            Err(e) => println!("VMV.d2 (GT): INVALID - {:?}", e),
+                        }
+                        offset += 384;
+                    }
+
+                    // VMV e1 (G1 compressed = 32 bytes for BN254)
+                    if offset + 32 <= proof_bytes.len() {
+                        let vmv_e1 = &proof_bytes[offset..offset+32];
+                        use ark_bn254::G1Affine;
+                        match G1Affine::deserialize_compressed(vmv_e1) {
+                            Ok(_) => println!("VMV.e1 (G1): valid"),
+                            Err(e) => println!("VMV.e1 (G1): INVALID - {:?}", e),
+                        }
+                        offset += 32;
+                    }
+
+                    // num_rounds (u32)
+                    if offset + 4 <= proof_bytes.len() {
+                        let num_rounds_bytes: [u8; 4] = proof_bytes[offset..offset+4].try_into().unwrap();
+                        let num_rounds = u32::from_le_bytes(num_rounds_bytes);
+                        println!("Dory num_rounds: {}", num_rounds);
+                        offset += 4;
+
+                        // Skip first and second messages
+                        // Each first message: 4*GT + G1 + G2 = 4*384 + 32 + 64 = 1632 bytes
+                        // Each second message: 2*GT + 2*G1 + 2*G2 = 2*384 + 2*32 + 2*64 = 960 bytes
+                        let first_msg_size = 4 * 384 + 32 + 64;
+                        let second_msg_size = 2 * 384 + 2 * 32 + 2 * 64;
+                        println!("First message size: {} bytes x {} rounds", first_msg_size, num_rounds);
+                        println!("Second message size: {} bytes x {} rounds", second_msg_size, num_rounds);
+
+                        // Try to parse first message[0]
+                        if num_rounds > 0 && offset + first_msg_size <= proof_bytes.len() {
+                            // d1_left (GT)
+                            let d1_left = &proof_bytes[offset..offset+384];
+                            match Fq12::deserialize_uncompressed(d1_left) {
+                                Ok(_) => println!("  first[0].d1_left (GT): valid"),
+                                Err(e) => println!("  first[0].d1_left (GT): INVALID - {:?}", e),
+                            }
+                        }
+
+                        offset += (num_rounds as usize) * first_msg_size;
+                        offset += (num_rounds as usize) * second_msg_size;
+
+                        // Final message: G1 + G2 = 32 + 64 = 96 bytes
+                        offset += 96;
+
+                        // nu, sigma (2 * u32 = 8 bytes)
+                        if offset + 8 <= proof_bytes.len() {
+                            let nu_bytes: [u8; 4] = proof_bytes[offset..offset+4].try_into().unwrap();
+                            let sigma_bytes: [u8; 4] = proof_bytes[offset+4..offset+8].try_into().unwrap();
+                            let nu = u32::from_le_bytes(nu_bytes);
+                            let sigma = u32::from_le_bytes(sigma_bytes);
+                            println!("Dory nu={}, sigma={}", nu, sigma);
+                            offset += 8;
+                        }
+
+                        println!("\nAfter Dory proof, offset = {}", offset);
+                        println!("Remaining bytes: {}", proof_bytes.len() - offset);
+                    }
+                }
+
+                // Advice proofs (5 Option values)
+                // Each Option<PCS::Proof> is either 0 (None) or 1 + Dory proof
+                // Option<PCS::Commitment> is either 0 (None) or 1 + GT (384 bytes)
+                println!("\n=== Advice proofs ===");
+                for i in 0..5 {
+                    if offset < proof_bytes.len() {
+                        let opt = proof_bytes[offset];
+                        let name = match i {
+                            0 => "trusted_advice_val_evaluation",
+                            1 => "trusted_advice_val_final",
+                            2 => "untrusted_advice_val_evaluation",
+                            3 => "untrusted_advice_val_final",
+                            4 => "untrusted_advice_commitment",
+                            _ => "unknown"
+                        };
+                        println!("  {}: option byte = {}", name, opt);
+                        offset += 1;
+                        if opt == 1 {
+                            // Has content - for proofs it's a Dory proof, for commitment it's GT
+                            if i == 4 {
+                                offset += 384; // GT commitment
+                            } else {
+                                // Skip Dory proof (variable size, would need parsing)
+                                println!("    WARNING: has content, cannot easily skip");
+                            }
+                        }
+                    }
+                }
+
+                // Configuration values (5 usizes)
+                println!("\n=== Configuration ===");
+                for i in 0..5 {
+                    if offset + 8 <= proof_bytes.len() {
+                        let val_bytes: [u8; 8] = proof_bytes[offset..offset+8].try_into().unwrap();
+                        let val = u64::from_le_bytes(val_bytes);
+                        let name = match i {
+                            0 => "trace_length",
+                            1 => "ram_K",
+                            2 => "bytecode_K",
+                            3 => "log_k_chunk",
+                            4 => "lookups_ra_virtual_log_k_chunk",
+                            _ => "unknown"
+                        };
+                        println!("  {}: {}", name, val);
+                        offset += 8;
+                    }
+                }
+
+                println!("\nFinal offset: {}, remaining: {}", offset, proof_bytes.len() - offset);
             }
         }
+    }
+
+    /// Step-by-step deserialization test for debugging
+    #[test]
+    #[ignore = "debug test for stepwise deserialization"]
+    fn test_stepwise_deserialize() {
+        use ark_serialize::{CanonicalDeserialize, Compress, Validate};
+        use ark_bn254::{Fr, Fq12, G1Affine};
+        use std::io::Cursor;
+        use crate::zkvm::proof_serialization::Claims;
+        use crate::subprotocols::univariate_skip::UniSkipFirstRoundProof;
+        use crate::subprotocols::sumcheck::SumcheckInstanceProof;
+        use crate::transcripts::Blake2bTranscript;
+        use crate::poly::commitment::dory::ArkDoryProof;
+
+        let proof_path = "/tmp/zolt_proof_dory.bin";
+        if !Path::new(proof_path).exists() {
+            println!("No proof file at {}", proof_path);
+            return;
+        }
+
+        let proof_bytes = fs::read(proof_path).expect("Failed to read Zolt proof");
+        let mut cursor = Cursor::new(&proof_bytes);
+        let compress = Compress::Yes;
+        let validate = Validate::Yes;
+
+        println!("Total proof bytes: {}", proof_bytes.len());
+
+        // 1. Claims
+        println!("\n=== Step 1: Claims ===");
+        let claims = match Claims::<Fr>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(c) => {
+                println!("OK: {} claims at position {}", c.0.len(), cursor.position());
+                c
+            }
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 2. Commitments (Vec<GT>)
+        println!("\n=== Step 2: Commitments (Vec<GT>) ===");
+        let commitments = match <Vec<Fq12>>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(c) => {
+                println!("OK: {} commitments at position {}", c.len(), cursor.position());
+                c
+            }
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 3. Stage 1 UniSkip
+        println!("\n=== Step 3: Stage 1 UniSkip ===");
+        match <UniSkipFirstRoundProof<Fr, Blake2bTranscript>>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(p) => println!("OK: {} coeffs at position {}", p.uni_poly.coeffs.len(), cursor.position()),
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 4. Stage 1 Sumcheck
+        println!("\n=== Step 4: Stage 1 Sumcheck ===");
+        match <SumcheckInstanceProof<Fr, Blake2bTranscript>>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(p) => println!("OK: {} rounds at position {}", p.compressed_polys.len(), cursor.position()),
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 5. Stage 2 UniSkip
+        println!("\n=== Step 5: Stage 2 UniSkip ===");
+        match <UniSkipFirstRoundProof<Fr, Blake2bTranscript>>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(p) => println!("OK: {} coeffs at position {}", p.uni_poly.coeffs.len(), cursor.position()),
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 6. Stage 2 Sumcheck
+        println!("\n=== Step 6: Stage 2 Sumcheck ===");
+        match <SumcheckInstanceProof<Fr, Blake2bTranscript>>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(p) => println!("OK: {} rounds at position {}", p.compressed_polys.len(), cursor.position()),
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 7-11. Stages 3-7 Sumcheck
+        for stage in 3..=7 {
+            println!("\n=== Step {}: Stage {} Sumcheck ===", stage + 4, stage);
+            match <SumcheckInstanceProof<Fr, Blake2bTranscript>>::deserialize_with_mode(&mut cursor, compress, validate) {
+                Ok(p) => println!("OK: {} rounds at position {}", p.compressed_polys.len(), cursor.position()),
+                Err(e) => {
+                    println!("FAILED at position {}: {:?}", cursor.position(), e);
+                    return;
+                }
+            };
+        }
+
+        // 12. Joint opening proof (Dory proof)
+        println!("\n=== Step 12: Dory Opening Proof ===");
+        match ArkDoryProof::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(p) => println!("OK: {} rounds, nu={}, sigma={} at position {}",
+                p.first_messages.len(), p.nu, p.sigma, cursor.position()),
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                // Show context around failure
+                let pos = cursor.position() as usize;
+                println!("Bytes around position {}:", pos);
+                let start = pos.saturating_sub(16);
+                let end = std::cmp::min(pos + 32, proof_bytes.len());
+                for (i, chunk) in proof_bytes[start..end].chunks(16).enumerate() {
+                    print!("{:04x}: ", start + i * 16);
+                    for b in chunk {
+                        print!("{:02x} ", b);
+                    }
+                    println!();
+                }
+                return;
+            }
+        };
+
+        // 13-16. Option proofs
+        println!("\n=== Step 13-16: Option Proofs ===");
+        for i in 0..4 {
+            let name = match i {
+                0 => "trusted_advice_val_evaluation",
+                1 => "trusted_advice_val_final",
+                2 => "untrusted_advice_val_evaluation",
+                3 => "untrusted_advice_val_final",
+                _ => "unknown"
+            };
+            match <Option<ArkDoryProof>>::deserialize_with_mode(&mut cursor, compress, validate) {
+                Ok(opt) => println!("{}: {:?} at position {}", name, opt.is_some(), cursor.position()),
+                Err(e) => {
+                    println!("{} FAILED at position {}: {:?}", name, cursor.position(), e);
+                    return;
+                }
+            };
+        }
+
+        // 17. Option commitment
+        println!("\n=== Step 17: Optional Commitment ===");
+        match <Option<Fq12>>::deserialize_with_mode(&mut cursor, compress, validate) {
+            Ok(opt) => println!("untrusted_advice_commitment: {:?} at position {}", opt.is_some(), cursor.position()),
+            Err(e) => {
+                println!("FAILED at position {}: {:?}", cursor.position(), e);
+                return;
+            }
+        };
+
+        // 18-22. Configuration values
+        println!("\n=== Step 18-22: Configuration ===");
+        for i in 0..5 {
+            let name = match i {
+                0 => "trace_length",
+                1 => "ram_K",
+                2 => "bytecode_K",
+                3 => "log_k_chunk",
+                4 => "lookups_ra_virtual_log_k_chunk",
+                _ => "unknown"
+            };
+            match <usize>::deserialize_with_mode(&mut cursor, compress, validate) {
+                Ok(val) => println!("{}: {} at position {}", name, val, cursor.position()),
+                Err(e) => {
+                    println!("{} FAILED at position {}: {:?}", name, cursor.position(), e);
+                    return;
+                }
+            };
+        }
+
+        println!("\n=== COMPLETE ===");
+        println!("Final position: {}, Total: {}", cursor.position(), proof_bytes.len());
     }
 
     /// Export a test Dory commitment for comparison with Zolt
