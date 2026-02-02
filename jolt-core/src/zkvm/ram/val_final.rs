@@ -117,6 +117,24 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
         let val_init_eval =
             untrusted_advice_contribution + trusted_advice_contribution + val_init_public_eval;
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("ValFinalSumcheckParams::new_from_verifier debug:");
+            eprintln!("  r_address.len() = {}", r_address.len());
+            for (i, r) in r_address.iter().enumerate().take(4) {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  r_address[{}]: {:02x?}", i, &r_bytes);
+            }
+            let mut val_init_eval_bytes = [0u8; 32];
+            val_init_eval.serialize_compressed(&mut val_init_eval_bytes[..]).ok();
+            eprintln!("  val_init_eval: {:02x?}", &val_init_eval_bytes);
+            let mut val_init_public_eval_bytes = [0u8; 32];
+            val_init_public_eval.serialize_compressed(&mut val_init_public_eval_bytes[..]).ok();
+            eprintln!("  val_init_public_eval: {:02x?}", &val_init_public_eval_bytes);
+        }
+
         ValFinalSumcheckParams {
             T: trace_len,
             val_init_eval,
@@ -345,6 +363,23 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ValFinalSum
                 SumcheckId::RamValFinalEvaluation,
             )
             .1;
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("ValFinal expected_output_claim debug:");
+            let mut inc_bytes = [0u8; 32];
+            inc_claim.serialize_compressed(&mut inc_bytes[..]).ok();
+            eprintln!("  inc_claim: {:02x?}", &inc_bytes);
+            let mut wa_bytes = [0u8; 32];
+            wa_claim.serialize_compressed(&mut wa_bytes[..]).ok();
+            eprintln!("  wa_claim: {:02x?}", &wa_bytes);
+            let result = inc_claim * wa_claim;
+            let mut res_bytes = [0u8; 32];
+            result.serialize_compressed(&mut res_bytes[..]).ok();
+            eprintln!("  result (inc*wa): {:02x?}", &res_bytes);
+        }
+
         inc_claim * wa_claim
     }
 

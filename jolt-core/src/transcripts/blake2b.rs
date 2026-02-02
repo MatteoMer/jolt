@@ -223,10 +223,23 @@ impl Transcript for Blake2bTranscript {
 
     // Compute powers of scalar q : (1, q, q^2, ..., q^(len-1))
     fn challenge_scalar_powers<F: JoltField>(&mut self, len: usize) -> Vec<F> {
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("[JOLT TRANSCRIPT] challenge_scalar_powers({}) state BEFORE: {:02x?}", len, &self.state[0..16]);
+            eprintln!("[JOLT TRANSCRIPT] n_rounds BEFORE: {}", self.n_rounds);
+        }
         let q: F = self.challenge_scalar();
         let mut q_powers = vec![F::one(); len];
         for i in 1..len {
             q_powers[i] = q_powers[i - 1] * q;
+        }
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut q_bytes = [0u8; 32];
+            q.serialize_compressed(&mut q_bytes[..]).ok();
+            eprintln!("[JOLT TRANSCRIPT] challenge_scalar_powers({}) gamma (LE full): {:02x?}", len, &q_bytes);
+            eprintln!("[JOLT TRANSCRIPT]   gamma low bytes (0..16): {:02x?}", &q_bytes[0..16]);
         }
         q_powers
     }

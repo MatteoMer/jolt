@@ -610,6 +610,19 @@ where
     ) {
         let key = OpeningId::Polynomial(PolynomialId::Virtual(polynomial), sumcheck);
         if let Some((_, claim)) = self.openings.get(&key) {
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                if sumcheck == SumcheckId::InstructionClaimReduction {
+                    eprintln!("append_virtual: {:?} {:?}", polynomial, sumcheck);
+                    eprintln!("  opening_point.r.len() = {}", opening_point.r.len());
+                    for (i, r) in opening_point.r.iter().enumerate().take(3) {
+                        let mut r_bytes = [0u8; 32];
+                        r.serialize_compressed(&mut r_bytes[..]).ok();
+                        eprintln!("  opening_point.r[{}] = {:02x?}", i, &r_bytes);
+                    }
+                }
+            }
             transcript.append_scalar(claim);
             let claim = *claim; // Copy the claim value
             self.openings.insert(key, (opening_point.clone(), claim));

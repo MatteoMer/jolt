@@ -90,6 +90,16 @@ impl<F: JoltField> RegistersReadWriteCheckingParams<F> {
             VirtualPolynomial::RdWriteValue,
             SumcheckId::RegistersClaimReduction,
         );
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("RegistersReadWriteCheckingParams::new debug:");
+            eprintln!("  T (trace_length) = {}", trace_length);
+            eprintln!("  phase1_num_rounds = {}", config.registers_rw_phase1_num_rounds);
+            eprintln!("  phase2_num_rounds = {}", config.registers_rw_phase2_num_rounds);
+            eprintln!("  LOG_K = {}", LOG_K);
+            eprintln!("  num_rounds = {} + {} = {}", LOG_K, trace_length.ilog2(), LOG_K + trace_length.ilog2() as usize);
+            eprintln!("  r_cycle.len() = {}", r_cycle.len());
+        }
         Self {
             gamma,
             T: trace_length,
@@ -144,15 +154,28 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
         sumcheck_challenges: &[F::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, F> {
         // Cycle variables are bound low-to-high in phase 1
-        let (phase1_challenges, sumcheck_challenges) =
+        let (phase1_challenges, remaining_after_phase1) =
             sumcheck_challenges.split_at(self.phase1_num_rounds);
         // Address variables are bound low-to-high in phase 2
-        let (phase2_challenges, sumcheck_challenges) =
-            sumcheck_challenges.split_at(self.phase2_num_rounds);
+        let (phase2_challenges, remaining_after_phase2) =
+            remaining_after_phase1.split_at(self.phase2_num_rounds);
         // Remaining cycle variables, then address variables are
         // bound low-to-high in phase 3
         let (phase3_cycle_challenges, phase3_address_challenges) =
-            sumcheck_challenges.split_at(self.T.log_2() - self.phase1_num_rounds);
+            remaining_after_phase2.split_at(self.T.log_2() - self.phase1_num_rounds);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("RegistersRWC normalize_opening_point debug:");
+            eprintln!("  total challenges = {}", sumcheck_challenges.len());
+            eprintln!("  phase1_num_rounds = {}", self.phase1_num_rounds);
+            eprintln!("  phase2_num_rounds = {}", self.phase2_num_rounds);
+            eprintln!("  phase3_cycle_len = {} (T.log_2={} - phase1={})",
+                     phase3_cycle_challenges.len(), self.T.log_2(), self.phase1_num_rounds);
+            eprintln!("  phase3_address_len = {}", phase3_address_challenges.len());
+            eprintln!("  phase1_challenges.len() = {}", phase1_challenges.len());
+            eprintln!("  phase2_challenges.len() = {}", phase2_challenges.len());
+        }
 
         // Both Phase 1/2 (GruenSplitEqPolynomial LowToHigh) and Phase 3 (dense LowToHigh)
         // bind variables from the "bottom" (last w component) to "top" (first w component).
@@ -169,6 +192,12 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
             .copied()
             .chain(phase2_challenges.iter().rev().copied())
             .collect();
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("  r_cycle.len() = {}", r_cycle.len());
+            eprintln!("  r_address.len() = {}", r_address.len());
+        }
 
         [r_address, r_cycle].concat().into()
     }
@@ -859,9 +888,51 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let rs1_value_claim = rs1_ra_claim * val_claim;
         let rs2_value_claim = rs2_ra_claim * val_claim;
 
-        let result = EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle)
-            * (rd_write_value_claim
-                + self.params.gamma * (rs1_value_claim + self.params.gamma * rs2_value_claim));
+        let eq_eval = EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle);
+        let combined = rd_write_value_claim
+                + self.params.gamma * (rs1_value_claim + self.params.gamma * rs2_value_claim);
+        let result = eq_eval * combined;
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut val_bytes = [0u8; 32];
+            let mut rs1_ra_bytes = [0u8; 32];
+            let mut rs2_ra_bytes = [0u8; 32];
+            let mut rd_wa_bytes = [0u8; 32];
+            let mut inc_bytes = [0u8; 32];
+            val_claim.serialize_compressed(&mut val_bytes[..]).ok();
+            rs1_ra_claim.serialize_compressed(&mut rs1_ra_bytes[..]).ok();
+            rs2_ra_claim.serialize_compressed(&mut rs2_ra_bytes[..]).ok();
+            rd_wa_claim.serialize_compressed(&mut rd_wa_bytes[..]).ok();
+            inc_claim.serialize_compressed(&mut inc_bytes[..]).ok();
+            eprintln!("RegistersRWC expected_output_claim:");
+            eprintln!("  val_claim:    {:02x?}", &val_bytes);
+            eprintln!("  rs1_ra_claim: {:02x?}", &rs1_ra_bytes);
+            eprintln!("  rs2_ra_claim: {:02x?}", &rs2_ra_bytes);
+            eprintln!("  rd_wa_claim:  {:02x?}", &rd_wa_bytes);
+            eprintln!("  inc_claim:    {:02x?}", &inc_bytes);
+
+            let mut eq_bytes = [0u8; 32];
+            let mut combined_bytes = [0u8; 32];
+            eq_eval.serialize_compressed(&mut eq_bytes[..]).ok();
+            combined.serialize_compressed(&mut combined_bytes[..]).ok();
+            eprintln!("  eq_eval:      {:02x?}", &eq_bytes);
+            eprintln!("  combined:     {:02x?}", &combined_bytes);
+
+            eprintln!("  r_cycle (from sumcheck): {} elements", r_cycle.len());
+            for (i, r) in r_cycle.r.iter().enumerate().take(8) {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("    r_cycle[{}]: {:02x?}", i, &r_bytes);
+            }
+            eprintln!("  params.r_cycle (from Stage 3): {} elements", self.params.r_cycle.len());
+            for (i, r) in self.params.r_cycle.r.iter().enumerate().take(8) {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("    params.r_cycle[{}]: {:02x?}", i, &r_bytes);
+            }
+        }
 
         #[cfg(test)]
         {

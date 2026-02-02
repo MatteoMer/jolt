@@ -123,11 +123,56 @@ impl<F: JoltField> CanonicalDeserialize for Claims<F> {
         validate: Validate,
     ) -> Result<Self, SerializationError> {
         let size = usize::deserialize_with_mode(&mut reader, compress, validate)?;
+        eprintln!("[Claims::deserialize] size = {}", size);
         let mut claims = BTreeMap::new();
-        for _ in 0..size {
-            let key = OpeningId::deserialize_with_mode(&mut reader, compress, validate)?;
-            let claim = F::deserialize_with_mode(&mut reader, compress, validate)?;
+        let mut byte_offset = 8usize; // 8 bytes for size
+        for i in 0..size {
+            let key_start_offset = byte_offset;
+            let key = match OpeningId::deserialize_with_mode(&mut reader, compress, validate) {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("[Claims::deserialize] Failed at claim {} (key): {:?}", i, e);
+                    return Err(e);
+                }
+            };
+            // Update offset after reading key
+            byte_offset += key.serialized_size(compress);
+            // Debug: print raw bytes before deserialization for LookupTableFlag
+            if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::LookupTableFlag(idx)), _) = &key {
+                // Read 32 bytes to see what's there
+                let mut peek_bytes = [0u8; 32];
+                use std::io::Read;
+                eprintln!("[Claims::deserialize] LookupTableFlag({}) key_offset=0x{:x} value_offset=0x{:x}", idx, key_start_offset, byte_offset);
+                if reader.read_exact(&mut peek_bytes).is_ok() {
+                    eprintln!("[Claims::deserialize PRE] LookupTableFlag({}) claim_idx={} raw bytes = {:02x?}", idx, i, &peek_bytes);
+                    // Create a new reader from the bytes for actual deserialization
+                    let mut peek_reader = std::io::Cursor::new(&peek_bytes[..]);
+                    let claim = F::deserialize_with_mode(&mut peek_reader, compress, validate)
+                        .map_err(|e| {
+                            eprintln!("[Claims::deserialize] Failed at claim {} (value): {:?}", i, e);
+                            e
+                        })?;
+                    if !claim.is_zero() {
+                        use ark_serialize::CanonicalSerialize;
+                        let mut ser_bytes = [0u8; 32];
+                        claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                        eprintln!("[Claims::deserialize POST] LookupTableFlag({}) serialized = {:02x?}", idx, &ser_bytes);
+                    }
+                    claims.insert(key, (OpeningPoint::default(), claim));
+                    byte_offset += 32; // value size
+                    continue;
+                }
+            }
+            eprintln!("[Claims::deserialize] claim {} key = {:?}", i, key);
+            let claim = match F::deserialize_with_mode(&mut reader, compress, validate) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[Claims::deserialize] Failed at claim {} (value): {:?}", i, e);
+                    return Err(e);
+                }
+            };
             claims.insert(key, (OpeningPoint::default(), claim));
+            byte_offset += 32; // value size
         }
 
         Ok(Claims(claims))

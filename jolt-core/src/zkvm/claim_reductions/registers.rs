@@ -480,6 +480,28 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let opening_point = SumcheckInstanceVerifier::<F, T>::get_params(self)
             .normalize_opening_point(sumcheck_challenges);
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("RegistersClaimReduction cache_openings:");
+            eprintln!("  sumcheck_challenges.len() = {}", sumcheck_challenges.len());
+            // Print both Challenge and Field forms to see if they differ
+            for (i, r) in sumcheck_challenges.iter().enumerate() {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  challenges[{}] as Challenge: {:02x?}", i, &r_bytes);
+                let r_field: F = (*r).into();
+                r_field.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  challenges[{}] as F:         {:02x?}", i, &r_bytes);
+            }
+            eprintln!("  opening_point.len() = {}", opening_point.len());
+            for (i, r) in opening_point.r.iter().enumerate() {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  opening_point[{}]:            {:02x?}", i, &r_bytes);
+            }
+        }
+
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::RdWriteValue,

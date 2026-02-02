@@ -21,3 +21,6 @@ pub mod transcripts;
 pub mod utils;
 pub mod zkvm;
 pub use ark_bn254;
+
+#[cfg(test)]
+mod zolt_compat_test;

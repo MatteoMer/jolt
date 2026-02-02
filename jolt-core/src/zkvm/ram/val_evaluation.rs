@@ -142,6 +142,24 @@ impl<F: JoltField> ValEvaluationSumcheckParams<F> {
         // Combine all contributions: untrusted + trusted + public
         let init_eval = untrusted_contribution + trusted_contribution + val_init_public_eval;
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("ValEvaluationSumcheckParams::new_from_verifier debug:");
+            eprintln!("  r_address.r.len() = {}", r_address.r.len());
+            for (i, r) in r_address.r.iter().enumerate().take(16) {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  r_address[{}]: {:02x?}", i, &r_bytes);
+            }
+            let mut init_bytes = [0u8; 32];
+            init_eval.serialize_compressed(&mut init_bytes[..]).ok();
+            eprintln!("  init_eval: {:02x?}", &init_bytes);
+            let mut pub_bytes = [0u8; 32];
+            val_init_public_eval.serialize_compressed(&mut pub_bytes[..]).ok();
+            eprintln!("  val_init_public_eval: {:02x?}", &pub_bytes);
+        }
+
         ValEvaluationSumcheckParams {
             init_eval,
             T: trace_len,
@@ -378,6 +396,25 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         );
         let (_, wa_claim) = accumulator
             .get_virtual_polynomial_opening(VirtualPolynomial::RamRa, SumcheckId::RamValEvaluation);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("ValEvaluation expected_output_claim debug:");
+            let mut inc_bytes = [0u8; 32];
+            inc_claim.serialize_compressed(&mut inc_bytes[..]).ok();
+            eprintln!("  inc_claim: {:02x?}", &inc_bytes);
+            let mut wa_bytes = [0u8; 32];
+            wa_claim.serialize_compressed(&mut wa_bytes[..]).ok();
+            eprintln!("  wa_claim: {:02x?}", &wa_bytes);
+            let mut lt_bytes = [0u8; 32];
+            lt_eval.serialize_compressed(&mut lt_bytes[..]).ok();
+            eprintln!("  lt_eval: {:02x?}", &lt_bytes);
+            let result = inc_claim * wa_claim * lt_eval;
+            let mut res_bytes = [0u8; 32];
+            result.serialize_compressed(&mut res_bytes[..]).ok();
+            eprintln!("  result (inc*wa*lt): {:02x?}", &res_bytes);
+        }
 
         // Return inc_claim * wa_claim * lt_eval
         inc_claim * wa_claim * lt_eval

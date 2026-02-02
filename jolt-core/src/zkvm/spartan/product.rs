@@ -724,6 +724,29 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             )
             .1;
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[JOLT] ProductVirtualRemainder expected_output_claim:");
+            let mut bytes = [0u8; 32];
+            l_inst.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  l_inst: {:02x?}", &bytes[0..16]);
+            r_inst.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  r_inst: {:02x?}", &bytes[0..16]);
+            is_rd_not_zero.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  is_rd_not_zero: {:02x?}", &bytes[0..16]);
+            wl_flag.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  wl_flag: {:02x?}", &bytes[0..16]);
+            j_flag.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  j_flag: {:02x?}", &bytes[0..16]);
+            lookup_out.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  lookup_out: {:02x?}", &bytes[0..16]);
+            branch_flag.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  branch_flag: {:02x?}", &bytes[0..16]);
+            next_is_noop.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("  next_is_noop: {:02x?}", &bytes[0..16]);
+        }
+
         let fused_left = w[0] * l_inst
             + w[1] * is_rd_not_zero
             + w[2] * is_rd_not_zero
@@ -737,6 +760,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
         // Multiply by L(τ_high, r0) and Eq(τ_low, r_tail^rev)
         let tau_high = &self.params.tau[self.params.tau.len() - 1];
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            let tau_h: F = (*tau_high).into();
+            tau_h.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder tau_high: {:02x?}", &bytes[0..16]);
+            let r0_f: F = self.params.r0.into();
+            r0_f.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder r0: {:02x?}", &bytes[0..16]);
+            eprintln!("[JOLT] ProductVirtualRemainder tau.len = {}", self.params.tau.len());
+        }
         let tau_high_bound_r0 = LagrangePolynomial::<F>::lagrange_kernel::<
             F::Challenge,
             PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
@@ -746,6 +781,22 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             sumcheck_challenges.iter().rev().copied().collect();
         let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            fused_left.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder fused_left: {:02x?}", &bytes[0..16]);
+            fused_right.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder fused_right: {:02x?}", &bytes[0..16]);
+            tau_high_bound_r0.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder tau_high_bound_r0: {:02x?}", &bytes[0..16]);
+            tau_bound_r_tail_reversed.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder tau_bound_r_tail_rev: {:02x?}", &bytes[0..16]);
+            let result = tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right;
+            result.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT] ProductVirtualRemainder expected_output_claim: {:02x?}", &bytes[0..16]);
+        }
         tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right
     }
 
@@ -755,7 +806,30 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[<F as JoltField>::Challenge],
     ) {
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("[JOLT] ProductVirtualRemainder cache_openings:");
+            eprintln!("  sumcheck_challenges.len = {}", sumcheck_challenges.len());
+            for (i, c) in sumcheck_challenges.iter().enumerate() {
+                use ark_serialize::CanonicalSerialize;
+                let c_field: F = (*c).into();
+                let mut bytes = [0u8; 32];
+                c_field.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  sumcheck_challenges[{}]: {:02x?}", i, &bytes[0..16]);
+            }
+        }
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("  opening_point.len = {}", opening_point.r.len());
+            for (i, r) in opening_point.r.iter().enumerate() {
+                use ark_serialize::CanonicalSerialize;
+                let r_field: F = (*r).into();
+                let mut bytes = [0u8; 32];
+                r_field.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  opening_point[{}]: {:02x?}", i, &bytes[0..16]);
+            }
+        }
         for vp in PRODUCT_UNIQUE_FACTOR_VIRTUALS.iter() {
             accumulator.append_virtual(
                 transcript,

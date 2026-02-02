@@ -305,7 +305,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             &mut self.transcript,
         );
 
-        let _r_stage3 = BatchedSumcheck::verify(
+        let r_stage3 = BatchedSumcheck::verify(
             &self.proof.stage3_sumcheck_proof,
             vec![
                 &spartan_shift as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
@@ -316,6 +316,17 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             &mut self.transcript,
         )
         .context("Stage 3")?;
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("Stage 3 verification passed, r_stage3.len() = {}", r_stage3.len());
+            for (i, r) in r_stage3.iter().enumerate() {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  r_stage3[{}]: {:02x?}", i, &r_bytes[16..32]);
+            }
+        }
 
         Ok(())
     }

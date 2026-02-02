@@ -495,8 +495,36 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionClaimReduction] cache_openings: sumcheck_challenges.len = {}", sumcheck_challenges.len());
+            for (i, c) in sumcheck_challenges.iter().enumerate().take(3) {
+                let mut c_bytes = [0u8; 32];
+                let c_field: F = (*c).into();
+                c_field.serialize_compressed(&mut c_bytes[..]).ok();
+                eprintln!("  sumcheck_challenges[{}] = {:02x?}", i, &c_bytes);
+            }
+            for (i, c) in sumcheck_challenges.iter().enumerate().skip(5).take(3) {
+                let mut c_bytes = [0u8; 32];
+                let c_field: F = (*c).into();
+                c_field.serialize_compressed(&mut c_bytes[..]).ok();
+                eprintln!("  sumcheck_challenges[{}] = {:02x?}", i, &c_bytes);
+            }
+        }
         let opening_point = SumcheckInstanceVerifier::<F, T>::get_params(self)
             .normalize_opening_point(sumcheck_challenges);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionClaimReduction] After normalize_opening_point:");
+            for (i, r) in opening_point.r.iter().enumerate().take(3) {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  opening_point.r[{}] = {:02x?}", i, &r_bytes);
+            }
+        }
 
         accumulator.append_virtual(
             transcript,

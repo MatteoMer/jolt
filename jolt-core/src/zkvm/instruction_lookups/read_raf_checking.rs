@@ -1223,7 +1223,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let eq_eval_r_reduction = EqPolynomial::<F>::mle(&r_reduction, &r_cycle_prime.r);
 
         let n_virtual_ra_polys = LOG_K / self.params.ra_virtual_log_k_chunk;
-        let ra_claim = (0..n_virtual_ra_polys)
+        let ra_claims: Vec<F> = (0..n_virtual_ra_polys)
             .map(|i| {
                 accumulator
                     .get_virtual_polynomial_opening(
@@ -1232,7 +1232,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                     )
                     .1
             })
-            .product::<F>();
+            .collect();
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionReadRaf] ra_chunk claims:");
+            for (i, claim) in ra_claims.iter().enumerate() {
+                let mut bytes = [0u8; 32];
+                claim.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  ra_claims[{}] = {:02x?}", i, &bytes[16..]);
+            }
+        }
+        let ra_claim: F = ra_claims.into_iter().product();
 
         let table_flag_claims: Vec<F> = (0..LookupTables::<XLEN>::COUNT)
             .map(|i| {
@@ -1244,6 +1255,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                     .1
             })
             .collect();
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionReadRaf] Non-zero table_flag claims:");
+            for (i, claim) in table_flag_claims.iter().enumerate() {
+                if !claim.is_zero() {
+                    let mut bytes = [0u8; 32];
+                    claim.serialize_compressed(&mut bytes[..]).ok();
+                    eprintln!("  table_flag[{}] = {:02x?}", i, &bytes[16..]);
+                }
+            }
+        }
 
         let raf_flag_claim = accumulator
             .get_virtual_polynomial_opening(
@@ -1251,6 +1274,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                 SumcheckId::InstructionReadRaf,
             )
             .1;
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            raf_flag_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[InstructionReadRaf] raf_flag_claim = {:02x?}", &bytes);
+        }
 
         let val_claim = val_evals
             .into_iter()
@@ -1261,6 +1291,32 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let raf_claim = (F::one() - raf_flag_claim)
             * (left_operand_eval + self.params.gamma * right_operand_eval)
             + raf_flag_claim * self.params.gamma * identity_poly_eval;
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            fn to_bytes<F: CanonicalSerialize>(f: &F) -> Vec<u8> {
+                let mut buf = vec![];
+                f.serialize_compressed(&mut buf).unwrap();
+                buf
+            }
+            println!("InstructionReadRaf expected_output_claim debug:");
+            println!("  left_operand_eval:  {:02x?}", &to_bytes(&left_operand_eval)[..16]);
+            println!("  right_operand_eval: {:02x?}", &to_bytes(&right_operand_eval)[..16]);
+            println!("  identity_poly_eval: {:02x?}", &to_bytes(&identity_poly_eval)[..16]);
+            println!("  gamma:              {:02x?}", &to_bytes(&self.params.gamma)[..16]);
+            println!("  eq_eval_r_reduction: {:02x?}", &to_bytes(&eq_eval_r_reduction)[..16]);
+            println!("  ra_claim:           {:02x?}", &to_bytes(&ra_claim)[..16]);
+            println!("  raf_flag_claim:     {:02x?}", &to_bytes(&raf_flag_claim)[..16]);
+            println!("  raf_claim:          {:02x?}", &to_bytes(&raf_claim)[..16]);
+            println!("  val_claim:          {:02x?}", &to_bytes(&val_claim)[..16]);
+            println!("  r_reduction[0]:     {:02x?}", &to_bytes(&r_reduction[0]));
+            println!("  r_cycle_prime[0]:   {:02x?}", &to_bytes(&r_cycle_prime.r[0]));
+            println!("  r_reduction.len():  {}", r_reduction.len());
+            println!("  r_cycle_prime.len():{}", r_cycle_prime.r.len());
+            let final_result = eq_eval_r_reduction * ra_claim * (val_claim + self.params.gamma * raf_claim);
+            println!("  final_result:       {:02x?}", &to_bytes(&final_result)[..16]);
+        }
 
         eq_eval_r_reduction * ra_claim * (val_claim + self.params.gamma * raf_claim)
     }
