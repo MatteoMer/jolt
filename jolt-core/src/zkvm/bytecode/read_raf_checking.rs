@@ -48,6 +48,401 @@ use tracer::instruction::{Cycle, Instruction};
 /// Number of batched read-checking sumchecks bespokely
 const N_STAGES: usize = 5;
 
+/// Pre-computed bytecode entry flags that match Zolt's flag computation.
+/// These flags differ from Jolt's `Flags` trait implementations because
+/// Zolt handles instructions directly without virtual sequence expansion.
+///
+/// Also stores register indices as Zolt computes them (from raw instruction bits),
+/// which differs from Jolt's normalized operands for B-format and S-format instructions.
+#[cfg(feature = "zolt-debug")]
+#[derive(Clone, Debug)]
+pub struct ZoltBytecodeFlags {
+    /// Circuit flags (13 bools), indexed by CircuitFlags enum
+    pub circuit_flags: [bool; NUM_CIRCUIT_FLAGS],
+    /// Instruction flags (7 bools), indexed by InstructionFlags enum
+    pub instruction_flags: [bool; crate::zkvm::instruction::NUM_INSTRUCTION_FLAGS],
+    /// Lookup table index (None = no lookup table)
+    pub lookup_table_index: Option<u8>,
+    /// Whether operands are interleaved (not combined arithmetically)
+    pub is_interleaved: bool,
+    /// Register indices as Zolt extracts them from raw instruction bits.
+    /// For B-format: rd = bits[11:7] (part of immediate in standard RISC-V).
+    /// For S-format: rd = bits[11:7] (part of immediate in standard RISC-V).
+    /// For other formats: rd, rs1, rs2 as normally decoded.
+    pub rd: Option<u8>,
+    pub rs1: Option<u8>,
+    pub rs2: Option<u8>,
+    /// Immediate value
+    pub imm: i128,
+    /// ELF address
+    pub address: usize,
+}
+
+#[cfg(feature = "zolt-debug")]
+impl ZoltBytecodeFlags {
+    /// Compute Zolt-compatible flags from a raw 32-bit instruction word.
+    /// This replicates Zolt's buildBytecodeEntries logic from stage6_prover.zig,
+    /// computing flags, register indices, and lookup table from the raw instruction bits.
+    pub fn from_raw_word(word: u32, address: usize) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+
+        let opcode = (word & 0x7F) as u8;
+        let funct3 = ((word >> 12) & 0x7) as u8;
+        let funct7 = ((word >> 25) & 0x7F) as u8;
+        let rd_raw = ((word >> 7) & 0x1F) as u8;
+        let rs1_raw = ((word >> 15) & 0x1F) as u8;
+        let rs2_raw = ((word >> 20) & 0x1F) as u8;
+
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        // Determine lookup table index (matching Zolt's getLookupTableIndex)
+        let lt_idx: u8 = match opcode {
+            0x33 => match funct3 { // R-type
+                0 => if funct7 == 0 { 0 } // ADD → RangeCheck
+                     else if funct7 == 0x20 { 0 } // SUB → RangeCheck
+                     else if funct7 == 0x01 { 0 } // MUL → RangeCheck
+                     else { 255 },
+                7 => if funct7 == 0 { 2 } // AND → And
+                     else if funct7 == 0x01 { 13 } // MULHU → UpperWord
+                     else { 255 },
+                6 => if funct7 == 0 { 4 } else { 255 }, // OR → Or
+                4 => if funct7 == 0 { 5 } else { 255 }, // XOR → Xor
+                1 => 255, // SLL - decomposed
+                5 => 255, // SRL/SRA - decomposed
+                2 => 10,  // SLT → SignedLessThan
+                3 => 11,  // SLTU → UnsignedLessThan
+                _ => 255,
+            },
+            0x13 => match funct3 { // I-type ALU
+                0 => 0,  // ADDI → RangeCheck
+                7 => 2,  // ANDI → And
+                6 => 4,  // ORI → Or
+                4 => 5,  // XORI → Xor
+                1 => 255, // SLLI - decomposed
+                5 => 255, // SRLI/SRAI - decomposed
+                2 => 10,  // SLTI → SignedLessThan
+                3 => 11,  // SLTIU → UnsignedLessThan
+                _ => 255,
+            },
+            0x63 => match funct3 { // Branches
+                0 => 6,  // BEQ → Equal
+                1 => 9,  // BNE → NotEqual
+                4 => 10, // BLT → SignedLessThan
+                5 => 7,  // BGE → SignedGreaterThanEqual
+                6 => 11, // BLTU → UnsignedLessThan
+                7 => 8,  // BGEU → UnsignedGreaterThanEqual
+                _ => 255,
+            },
+            0x37 => 0, // LUI → RangeCheck
+            0x17 => 0, // AUIPC → RangeCheck
+            0x6F => 0, // JAL → RangeCheck
+            0x67 => 1, // JALR → RangeCheckAligned
+            0x1b => if funct3 == 0 { 0 } else { 255 }, // ADDIW → RangeCheck
+            0x3b => match funct3 { // OP-32
+                0 => if funct7 == 0 { 0 }      // ADDW → RangeCheck
+                     else if funct7 == 0x20 { 0 } // SUBW → RangeCheck
+                     else { 255 },
+                _ => 255,
+            },
+            _ => 255, // Load, Store, ECALL, FENCE - no lookup table
+        };
+
+        let has_lookup = lt_idx != 255;
+        let lookup_table_index = if has_lookup { Some(lt_idx) } else { None };
+
+        // Load/Store flags
+        if opcode == 0x03 { cf[CF::Load as usize] = true; }
+        if opcode == 0x23 { cf[CF::Store as usize] = true; }
+
+        // Jump
+        if opcode == 0x6F || opcode == 0x67 { cf[CF::Jump as usize] = true; }
+
+        // WriteLookupOutputToRD
+        if has_lookup && opcode != 0x63 {
+            cf[CF::WriteLookupOutputToRD as usize] = true;
+        }
+
+        // AddOperands, SubtractOperands, MultiplyOperands
+        if has_lookup {
+            match opcode {
+                0x33 => { // R-type
+                    if funct3 == 0 && funct7 == 0 { cf[CF::AddOperands as usize] = true; }
+                    if funct3 == 0 && funct7 == 0x20 { cf[CF::SubtractOperands as usize] = true; }
+                    if funct7 == 0x01 && funct3 == 0 { cf[CF::MultiplyOperands as usize] = true; }
+                    if funct7 == 0x01 && funct3 == 3 { cf[CF::MultiplyOperands as usize] = true; }
+                },
+                0x13 => { if funct3 == 0 { cf[CF::AddOperands as usize] = true; } },
+                0x67 => { cf[CF::AddOperands as usize] = true; },
+                0x1b => { if funct3 == 0 { cf[CF::AddOperands as usize] = true; } },
+                0x3b => {
+                    if funct3 == 0 && funct7 == 0 { cf[CF::AddOperands as usize] = true; }
+                    if funct3 == 0 && funct7 == 0x20 { cf[CF::SubtractOperands as usize] = true; }
+                },
+                _ => {},
+            }
+        }
+
+        // Instruction flags
+        // LeftOperandIsPC
+        if has_lookup && (opcode == 0x17 || opcode == 0x6F) {
+            inf[IF::LeftOperandIsPC as usize] = true;
+        }
+
+        // LeftOperandIsRs1Value
+        if has_lookup {
+            match opcode {
+                0x33 | 0x13 | 0x67 | 0x63 | 0x1b | 0x3b => {
+                    inf[IF::LeftOperandIsRs1Value as usize] = true;
+                },
+                _ => {},
+            }
+        }
+
+        // RightOperandIsImm
+        if has_lookup {
+            match opcode {
+                0x13 | 0x67 | 0x37 | 0x17 | 0x6F | 0x1b => {
+                    inf[IF::RightOperandIsImm as usize] = true;
+                },
+                _ => {},
+            }
+        }
+
+        // RightOperandIsRs2Value
+        if has_lookup {
+            match opcode {
+                0x33 | 0x63 | 0x3b => {
+                    inf[IF::RightOperandIsRs2Value as usize] = true;
+                },
+                _ => {},
+            }
+        }
+
+        // Branch
+        if opcode == 0x63 { inf[IF::Branch as usize] = true; }
+
+        // IsRdNotZero - exclude stores (0x23) and branches (0x63)
+        if rd_raw != 0 && opcode != 0x23 && opcode != 0x63 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        // Compute is_interleaved
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        // Decode immediate value (matching Zolt's DecodedInstruction.decode)
+        let imm: i128 = match opcode {
+            0x13 | 0x03 | 0x67 | 0x1b => { // I-type
+                ((word as i32) >> 20) as i128
+            },
+            0x23 => { // S-type
+                let imm11_5 = (word >> 25) & 0x7F;
+                let imm4_0 = (word >> 7) & 0x1F;
+                let raw = (imm11_5 << 5) | imm4_0;
+                (((raw as i32) << 20) >> 20) as i128
+            },
+            0x63 => { // B-type
+                let b12 = (word >> 31) & 1;
+                let b11 = (word >> 7) & 1;
+                let b10_5 = (word >> 25) & 0x3F;
+                let b4_1 = (word >> 8) & 0xF;
+                let raw = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
+                (((raw as i32) << 19) >> 19) as i128
+            },
+            0x37 | 0x17 => { // U-type: imm = instruction & 0xFFFFF000 (sign-extended)
+                (word & 0xFFFFF000) as i32 as i128
+            },
+            0x6F => { // J-type
+                let b20 = (word >> 31) & 1;
+                let b19_12 = (word >> 12) & 0xFF;
+                let b11 = (word >> 20) & 1;
+                let b10_1 = (word >> 21) & 0x3FF;
+                let raw = (b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1);
+                (((raw as i32) << 11) >> 11) as i128
+            },
+            0x33 | 0x3b => 0, // R-type has no immediate
+            _ => 0,
+        };
+
+        // Determine rd, rs1, rs2 (always from raw instruction bits, matching Zolt)
+        let rd = Some(rd_raw);
+        let rs1 = Some(rs1_raw);
+        let rs2 = Some(rs2_raw);
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index,
+            is_interleaved,
+            rd,
+            rs1,
+            rs2,
+            imm,
+            address,
+        }
+    }
+
+    /// Create flags for a NoOp/padding bytecode entry.
+    /// In Zolt's buildBytecodeEntries, all entries are initialized with ALL flags false,
+    /// is_interleaved=false, address=0, rd=rs1=rs2=0, imm=0, lookup_table_index=255.
+    /// NoOp steps in the execution trace are skipped (line 91), so padding entries
+    /// remain as this zero-initialized state.
+    pub fn noop() -> Self {
+        use crate::zkvm::instruction::NUM_INSTRUCTION_FLAGS;
+        ZoltBytecodeFlags {
+            circuit_flags: [false; NUM_CIRCUIT_FLAGS],
+            instruction_flags: [false; NUM_INSTRUCTION_FLAGS],
+            lookup_table_index: None,
+            is_interleaved: false,
+            rd: Some(0),
+            rs1: Some(0),
+            rs2: Some(0),
+            imm: 0,
+            address: 0,
+        }
+    }
+
+    /// Create flags for bytecode entry k=0, which in Zolt's buildBytecodeEntries
+    /// is overwritten successively by the three termination instructions:
+    ///   1. LUI x31, upper20(termination_addr)
+    ///   2. ADDI x30, x0, 1
+    ///   3. SB x30, lower12(termination_addr)(x31)
+    ///
+    /// Critically, flags ACCUMULATE across these overwrites because Zolt only
+    /// sets flags to true but never clears them between overwrites. The final
+    /// entry has flags from ALL three instructions OR'd together.
+    ///
+    /// After this accumulation:
+    ///   cf: AddOperands(from ADDI) | Store(from SB) | WriteLookupOutputToRD(from LUI,ADDI)
+    ///       | VirtualInstruction | DoNotUpdateUnexpandedPC
+    ///   if: RightOperandIsImm(from LUI,ADDI) | LeftOperandIsRs1Value(from ADDI)
+    ///       | IsRdNotZero(from LUI: rd=31, ADDI: rd=30)
+    ///   rd, rs1, rs2, imm, address: from the LAST instruction (SB)
+    ///   is_interleaved: false (because AddOperands=true from ADDI)
+    ///   lookup_table_index: 255 (from SB, which has no lookup)
+    pub fn termination_store_k0(termination_address: u64) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+
+        let upper20 = ((termination_address >> 12) & 0xFFFFF) as u32;
+        let lower12 = (termination_address & 0xFFF) as u32;
+        let imm_upper7 = (lower12 >> 5) & 0x7F;
+        let imm_lower5 = lower12 & 0x1F;
+
+        // Start from zero-initialized entry (matching buildBytecodeEntries initialization)
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        // === LUI x31 pass: opcode=0x37, has_lookup=true (RangeCheck) ===
+        // WriteLookupOutputToRD (has_lookup && opcode != 0x63)
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        // AddOperands: LUI not in the switch → no
+        // VirtualInstruction, DoNotUpdateUnexpandedPC (is_termination_store)
+        cf[CF::VirtualInstruction as usize] = true;
+        cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        // Instruction flags from LUI:
+        // RightOperandIsImm: 0x37 in list → true
+        inf[IF::RightOperandIsImm as usize] = true;
+        // IsRdNotZero: rd=31, opcode=0x37 (not store/branch) → true
+        inf[IF::IsRdNotZero as usize] = true;
+
+        // === ADDI x30 pass: opcode=0x13, funct3=0, has_lookup=true (RangeCheck) ===
+        // AddOperands: opcode=0x13, funct3=0 → true
+        cf[CF::AddOperands as usize] = true;
+        // WriteLookupOutputToRD already true
+        // VirtualInstruction, DoNotUpdateUnexpandedPC already true
+        // LeftOperandIsRs1Value: 0x13 in list → true
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        // RightOperandIsImm already true
+        // IsRdNotZero: rd=30, opcode=0x13 → true (already)
+
+        // === SB pass: opcode=0x23, funct3=0, has_lookup=false (Store) ===
+        // Store flag
+        cf[CF::Store as usize] = true;
+        // has_lookup=false → no new WriteLookupOutputToRD/AddOperands/etc flags set
+        // But old ones remain! (This is the key: flags accumulate, never clear)
+        // VirtualInstruction, DoNotUpdateUnexpandedPC already true
+        // No instruction flag changes from SB (has_lookup=false, so all guarded blocks skip)
+        // IsRdNotZero: rd=8, but opcode=0x23 → condition fails. Old value remains (true).
+
+        // is_interleaved is ALWAYS set (not conditional), based on current cf state:
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        // SB encoding for rd/rs1/rs2/imm (last instruction wins for scalar fields):
+        let sb_word = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
+        let rd_raw = ((sb_word >> 7) & 0x1F) as u8;   // imm_lower5 bits
+        let rs1_raw = ((sb_word >> 15) & 0x1F) as u8;  // 31
+        let rs2_raw = ((sb_word >> 20) & 0x1F) as u8;  // 30
+
+        // SB S-type immediate
+        let sb_imm11_5 = (sb_word >> 25) & 0x7F;
+        let sb_imm4_0 = (sb_word >> 7) & 0x1F;
+        let sb_raw = (sb_imm11_5 << 5) | sb_imm4_0;
+        let imm = (((sb_raw as i32) << 20) >> 20) as i128;
+
+        // lookup_table_index accumulates like flags: LUI sets it to RangeCheck(0),
+        // ADDI keeps it at RangeCheck(0), SB has no lookup (255) so the guard
+        // `if (lt_idx != 255)` keeps the old value. Final: Some(0).
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(0),  // RangeCheck, accumulated from LUI/ADDI
+            is_interleaved,
+            rd: Some(rd_raw),
+            rs1: Some(rs1_raw),
+            rs2: Some(rs2_raw),
+            imm,
+            address: 0,
+        }
+    }
+
+    /// Build Zolt-compatible flags from raw ELF bytes.
+    /// `raw_words` must be the same length as `bytecode`.
+    /// `termination_address` is used to create the k=0 entry (termination SB store).
+    pub fn from_raw_words(raw_words: &[u32], bytecode: &[Instruction], termination_address: u64) -> Vec<Self> {
+        assert_eq!(raw_words.len(), bytecode.len());
+        let result: Vec<Self> = raw_words.iter().zip(bytecode.iter()).enumerate().map(|(k, (word, instr))| {
+            if k == 0 {
+                Self::termination_store_k0(termination_address)
+            } else if matches!(instr, Instruction::NoOp) {
+                Self::noop()
+            } else {
+                let norm = instr.normalize();
+                Self::from_raw_word(*word, norm.address)
+            }
+        }).collect();
+
+        // Debug: dump entries in same format as Zolt
+        use crate::zkvm::instruction::NUM_INSTRUCTION_FLAGS;
+        eprintln!("\n[JOLT BYTECODE ENTRIES] count={}", result.len());
+        for (k, e) in result.iter().enumerate().take(28) {
+            let mut cf_bits: u16 = 0;
+            for i in 0..NUM_CIRCUIT_FLAGS {
+                if e.circuit_flags[i] { cf_bits |= 1u16 << i; }
+            }
+            let mut if_bits: u8 = 0;
+            for i in 0..NUM_INSTRUCTION_FLAGS {
+                if e.instruction_flags[i] { if_bits |= 1u8 << i; }
+            }
+            let lt = match e.lookup_table_index {
+                Some(idx) => idx as u16,
+                None => 255,
+            };
+            eprintln!("  entry[{:2}]: addr=0x{:08x} rd={:2} rs1={:2} rs2={:2} imm={:6} cf=0x{:04x} if=0x{:02x} lt={:3} interl={}",
+                k, e.address, e.rd.unwrap_or(0), e.rs1.unwrap_or(0), e.rs2.unwrap_or(0),
+                e.imm, cf_bits, if_bits, lt, e.is_interleaved as u8);
+        }
+        eprintln!();
+
+        result
+    }
+}
+
 /// Bytecode instruction: multi-stage Read + RAF sumcheck (N_STAGES = 5).
 ///
 /// Stages virtualize different claim families (Stage1: Spartan outer; Stage2: product-virtualized
@@ -771,6 +1166,26 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
             EqPolynomial::<F>::evals(&r_register_5[..(REGISTER_COUNT as usize).log_2()]);
 
         // Fused pass: compute all val polynomials in a single parallel iteration
+        #[cfg(feature = "zolt-debug")]
+        let val_polys = {
+            // Use Zolt-compatible flag computation from raw instruction words
+            let raw_words = super::ZOLT_RAW_WORDS.get()
+                .expect("ZOLT_RAW_WORDS must be set before verification (call ZOLT_RAW_WORDS.set() in main.rs)");
+            let termination_address = *super::ZOLT_TERMINATION_ADDRESS.get()
+                .expect("ZOLT_TERMINATION_ADDRESS must be set before verification");
+            let zolt_flags = ZoltBytecodeFlags::from_raw_words(raw_words, bytecode, termination_address);
+            Self::compute_val_polys_zolt(
+                &zolt_flags,
+                &eq_r_register_4,
+                &eq_r_register_5,
+                &stage1_gammas,
+                &stage2_gammas,
+                &stage3_gammas,
+                &stage4_gammas,
+                &stage5_gammas,
+            )
+        };
+        #[cfg(not(feature = "zolt-debug"))]
         let val_polys = Self::compute_val_polys(
             bytecode,
             &eq_r_register_4,
@@ -879,10 +1294,23 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
             .zip(v2.par_iter_mut())
             .zip(v3.par_iter_mut())
             .zip(v4.par_iter_mut())
-            .for_each(|(((((instruction, o0), o1), o2), o3), o4)| {
+            .enumerate()
+            .for_each(|(k, (((((instruction, o0), o1), o2), o3), o4))| {
                 let instr = instruction.normalize();
                 let circuit_flags = instruction.circuit_flags();
                 let instr_flags = instruction.instruction_flags();
+
+                #[cfg(feature = "zolt-debug")]
+                if k < 20 {
+                    let lt = instruction.lookup_table();
+                    let lt_idx = lt.as_ref().map(|t| crate::zkvm::lookup_table::LookupTables::enum_index(t));
+                    eprintln!(
+                        "[VAL_POLY] k={} addr=0x{:08x} rd={:?} rs1={:?} rs2={:?} imm={} cf={:?} if={:?} lt={:?} interleaved={}",
+                        k, instr.address, instr.operands.rd, instr.operands.rs1, instr.operands.rs2,
+                        instr.operands.imm, &circuit_flags, &instr_flags, lt_idx,
+                        circuit_flags.is_interleaved_operands()
+                    );
+                }
 
                 // Stage 1 (Spartan outer sumcheck)
                 // Val(k) = unexpanded_pc(k) + γ·imm(k)
@@ -1003,6 +1431,145 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
                     if let Some(table) = instruction.lookup_table() {
                         let table_index = LookupTables::enum_index(&table);
                         lc += stage5_gammas[2 + table_index];
+                    }
+                    *o4 = lc;
+                }
+            });
+
+        vals.map(MultilinearPolynomial::from)
+    }
+
+    /// Compute Val polynomials using pre-computed Zolt-compatible flags.
+    ///
+    /// This is equivalent to `compute_val_polys` but uses pre-computed flags
+    /// instead of calling Jolt's `Flags` trait, because Zolt computes flags
+    /// differently than Jolt (e.g., LUI: Zolt doesn't set AddOperands,
+    /// JAL: Zolt sets WriteLookupOutputToRD but not AddOperands, etc.)
+    #[cfg(feature = "zolt-debug")]
+    #[allow(clippy::too_many_arguments)]
+    fn compute_val_polys_zolt(
+        zolt_flags: &[ZoltBytecodeFlags],
+        eq_r_register_4: &[F],
+        eq_r_register_5: &[F],
+        stage1_gammas: &[F],
+        stage2_gammas: &[F],
+        stage3_gammas: &[F],
+        stage4_gammas: &[F],
+        stage5_gammas: &[F],
+    ) -> [MultilinearPolynomial<F>; N_STAGES] {
+        let K = zolt_flags.len();
+
+        let mut vals: [Vec<F>; N_STAGES] = array::from_fn(|_| unsafe_allocate_zero_vec(K));
+        let [v0, v1, v2, v3, v4] = &mut vals;
+
+        zolt_flags
+            .par_iter()
+            .zip(v0.par_iter_mut())
+            .zip(v1.par_iter_mut())
+            .zip(v2.par_iter_mut())
+            .zip(v3.par_iter_mut())
+            .zip(v4.par_iter_mut())
+            .enumerate()
+            .for_each(|(k, (((((flags, o0), o1), o2), o3), o4))| {
+                let circuit_flags = &flags.circuit_flags;
+                let instr_flags = &flags.instruction_flags;
+
+                if k < 20 {
+                    eprintln!(
+                        "[ZOLT_VAL_POLY] k={} addr=0x{:08x} rd={:?} rs1={:?} rs2={:?} imm={} cf={:?} if={:?} lt={:?} interleaved={}",
+                        k, flags.address, flags.rd, flags.rs1, flags.rs2,
+                        flags.imm, &circuit_flags, &instr_flags, flags.lookup_table_index,
+                        flags.is_interleaved
+                    );
+                }
+
+                // Stage 1 (Spartan outer sumcheck)
+                // Val(k) = unexpanded_pc(k) + γ·imm(k) + γ²·cf[0](k) + ...
+                {
+                    let mut lc = F::from_u64(flags.address as u64);
+                    lc += F::from_i128(flags.imm) * stage1_gammas[1];
+                    for (i, flag) in circuit_flags.iter().enumerate() {
+                        if *flag {
+                            lc += stage1_gammas[2 + i];
+                        }
+                    }
+                    *o0 = lc;
+                }
+
+                // Stage 2 (product virtualization)
+                {
+                    let mut lc = F::zero();
+                    if circuit_flags[CircuitFlags::Jump as usize] {
+                        lc += stage2_gammas[0];
+                    }
+                    if instr_flags[InstructionFlags::Branch as usize] {
+                        lc += stage2_gammas[1];
+                    }
+                    if instr_flags[InstructionFlags::IsRdNotZero as usize] {
+                        lc += stage2_gammas[2];
+                    }
+                    if circuit_flags[CircuitFlags::WriteLookupOutputToRD as usize] {
+                        lc += stage2_gammas[3];
+                    }
+                    *o1 = lc;
+                }
+
+                // Stage 3 (Shift sumcheck)
+                {
+                    let mut lc = F::from_i128(flags.imm);
+                    lc += stage3_gammas[1].mul_u64(flags.address as u64);
+                    if instr_flags[InstructionFlags::LeftOperandIsRs1Value as usize] {
+                        lc += stage3_gammas[2];
+                    }
+                    if instr_flags[InstructionFlags::LeftOperandIsPC as usize] {
+                        lc += stage3_gammas[3];
+                    }
+                    if instr_flags[InstructionFlags::RightOperandIsRs2Value as usize] {
+                        lc += stage3_gammas[4];
+                    }
+                    if instr_flags[InstructionFlags::RightOperandIsImm as usize] {
+                        lc += stage3_gammas[5];
+                    }
+                    if instr_flags[InstructionFlags::IsNoop as usize] {
+                        lc += stage3_gammas[6];
+                    }
+                    if circuit_flags[CircuitFlags::VirtualInstruction as usize] {
+                        lc += stage3_gammas[7];
+                    }
+                    if circuit_flags[CircuitFlags::IsFirstInSequence as usize] {
+                        lc += stage3_gammas[8];
+                    }
+                    *o2 = lc;
+                }
+
+                // Stage 4 (registers read/write checking)
+                // Use Zolt's rd/rs1/rs2 values (raw instruction bits, NOT normalized)
+                {
+                    let rd_eq = flags.rd
+                        .filter(|&r| (r as usize) < eq_r_register_4.len())
+                        .map_or(F::zero(), |r| eq_r_register_4[r as usize]);
+                    let rs1_eq = flags.rs1
+                        .filter(|&r| (r as usize) < eq_r_register_4.len())
+                        .map_or(F::zero(), |r| eq_r_register_4[r as usize]);
+                    let rs2_eq = flags.rs2
+                        .filter(|&r| (r as usize) < eq_r_register_4.len())
+                        .map_or(F::zero(), |r| eq_r_register_4[r as usize]);
+                    *o3 = rd_eq * stage4_gammas[0]
+                        + rs1_eq * stage4_gammas[1]
+                        + rs2_eq * stage4_gammas[2];
+                }
+
+                // Stage 5 (registers val-evaluation + instruction lookups)
+                // Use Zolt's rd value (raw instruction bits)
+                {
+                    let mut lc = flags.rd
+                        .filter(|&r| (r as usize) < eq_r_register_5.len())
+                        .map_or(F::zero(), |r| eq_r_register_5[r as usize]);
+                    if !flags.is_interleaved {
+                        lc += stage5_gammas[1];
+                    }
+                    if let Some(table_index) = flags.lookup_table_index {
+                        lc += stage5_gammas[2 + table_index as usize];
                     }
                     *o4 = lc;
                 }
