@@ -970,6 +970,14 @@ impl<F: JoltField> RaReductionParams<F> {
         let gamma_squared = gamma * gamma;
         let gamma_cubed = gamma_squared * gamma;
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut gamma_bytes = [0u8; 32];
+            gamma.serialize_compressed(&mut gamma_bytes[..]).ok();
+            eprintln!("[STAGE5] gamma_ram_ra = {:02x?}", &gamma_bytes);
+        }
+
         Self {
             gamma,
             gamma_squared,
@@ -1079,6 +1087,52 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             VirtualPolynomial::RamRa,
             SumcheckId::RamRaClaimReduction,
         );
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[RamRaClaimReduction] expected_output_claim debug:");
+            // Print r_address_1 and r_address_2 first 4 elements
+            eprintln!("  r_address_1 (first 4):");
+            for (i, r) in self.params.r_address_1.iter().take(4).enumerate() {
+                let mut bytes = [0u8; 32];
+                let r_f: F = (*r).into();
+                r_f.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("    [{}]: {:02x?}", i, &bytes[16..]);
+            }
+            eprintln!("  r_address_2 (first 4):");
+            for (i, r) in self.params.r_address_2.iter().take(4).enumerate() {
+                let mut bytes = [0u8; 32];
+                let r_f: F = (*r).into();
+                r_f.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("    [{}]: {:02x?}", i, &bytes[16..]);
+            }
+            let mut eq_addr_1_bytes = [0u8; 32];
+            let mut eq_addr_2_bytes = [0u8; 32];
+            eq_addr_1.serialize_compressed(&mut eq_addr_1_bytes[..]).ok();
+            eq_addr_2.serialize_compressed(&mut eq_addr_2_bytes[..]).ok();
+            eprintln!("  eq_addr_1: {:02x?}", &eq_addr_1_bytes[0..16]);
+            eprintln!("  eq_addr_2: {:02x?}", &eq_addr_2_bytes[0..16]);
+            let mut eq_raf_bytes = [0u8; 32];
+            let mut eq_rw_bytes = [0u8; 32];
+            let mut eq_val_bytes = [0u8; 32];
+            eq_cycle_raf.serialize_compressed(&mut eq_raf_bytes[..]).ok();
+            eq_cycle_rw.serialize_compressed(&mut eq_rw_bytes[..]).ok();
+            eq_cycle_val.serialize_compressed(&mut eq_val_bytes[..]).ok();
+            eprintln!("  eq_cycle_raf: {:02x?}", &eq_raf_bytes[0..16]);
+            eprintln!("  eq_cycle_rw: {:02x?}", &eq_rw_bytes[0..16]);
+            eprintln!("  eq_cycle_val: {:02x?}", &eq_val_bytes[0..16]);
+            let mut eq_combined_bytes = [0u8; 32];
+            eq_combined.serialize_compressed(&mut eq_combined_bytes[..]).ok();
+            eprintln!("  eq_combined (LE full): {:02x?}", &eq_combined_bytes);
+            let mut ra_claim_bytes = [0u8; 32];
+            ra_claim_reduced.serialize_compressed(&mut ra_claim_bytes[..]).ok();
+            eprintln!("  ra_claim_reduced (LE full): {:02x?}", &ra_claim_bytes);
+            let result = eq_combined * ra_claim_reduced;
+            let mut result_bytes = [0u8; 32];
+            result.serialize_compressed(&mut result_bytes[..]).ok();
+            eprintln!("  expected_output_claim (LE full): {:02x?}", &result_bytes);
+        }
 
         eq_combined * ra_claim_reduced
     }

@@ -171,6 +171,38 @@ impl<F: JoltField> CanonicalDeserialize for Claims<F> {
                     return Err(e);
                 }
             };
+            // Debug: print InstructionRa claims
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::InstructionRa(idx)), sumcheck_id) = &key {
+                use ark_serialize::CanonicalSerialize;
+                let mut ser_bytes = [0u8; 32];
+                claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                eprintln!("[Claims::deserialize] InstructionRa({}) {:?} claim = {:02x?}", idx, sumcheck_id, &ser_bytes[16..]);
+            }
+            // Debug: print RegistersVal claim
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::RegistersVal), sumcheck_id) = &key {
+                use ark_serialize::CanonicalSerialize;
+                let mut ser_bytes = [0u8; 32];
+                claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                eprintln!("[Claims::deserialize] RegistersVal {:?} claim (LE) = {:02x?}", sumcheck_id, &ser_bytes);
+            }
+            // Debug: print RamValFinal claim
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::RamValFinal), sumcheck_id) = &key {
+                use ark_serialize::CanonicalSerialize;
+                let mut ser_bytes = [0u8; 32];
+                claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                eprintln!("[Claims::deserialize] RamValFinal {:?} claim (LE) = {:02x?}", sumcheck_id, &ser_bytes);
+            }
+            // Debug: print RamVal claim (used in ValEvaluation input_claim)
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::RamVal), sumcheck_id) = &key {
+                use ark_serialize::CanonicalSerialize;
+                let mut ser_bytes = [0u8; 32];
+                claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                eprintln!("[Claims::deserialize] RamVal {:?} claim (LE) = {:02x?}", sumcheck_id, &ser_bytes);
+            }
             claims.insert(key, (OpeningPoint::default(), claim));
             byte_offset += 32; // value size
         }

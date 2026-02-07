@@ -40,6 +40,7 @@ guest-verifier = [
     "jolt-core/minimal",
 ]
 malloc-shim = ["jolt-platform/malloc-shim"]
+zolt-debug = ["jolt-core/zolt-debug"]
 
 [dependencies]
 jolt-platform.workspace = true

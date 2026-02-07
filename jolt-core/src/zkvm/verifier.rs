@@ -202,14 +202,23 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 .append_serializable(trusted_advice_commitment);
         }
 
+        eprintln!("[VERIFY] Starting Stage 1...");
         self.verify_stage1()?;
+        eprintln!("[VERIFY] Stage 1 PASSED, starting Stage 2...");
         self.verify_stage2()?;
+        eprintln!("[VERIFY] Stage 2 PASSED, starting Stage 3...");
         self.verify_stage3()?;
+        eprintln!("[VERIFY] Stage 3 PASSED, starting Stage 4...");
         self.verify_stage4()?;
+        eprintln!("[VERIFY] Stage 4 PASSED, starting Stage 5...");
         self.verify_stage5()?;
+        eprintln!("[VERIFY] Stage 5 PASSED, starting Stage 6...");
         self.verify_stage6()?;
+        eprintln!("[VERIFY] Stage 6 PASSED, starting Stage 7...");
         self.verify_stage7()?;
+        eprintln!("[VERIFY] Stage 7 PASSED, starting Stage 8...");
         self.verify_stage8()?;
+        eprintln!("[VERIFY] Stage 8 PASSED - ALL STAGES COMPLETE!");
 
         Ok(())
     }
@@ -326,6 +335,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 r.serialize_compressed(&mut r_bytes[..]).ok();
                 eprintln!("  r_stage3[{}]: {:02x?}", i, &r_bytes[16..32]);
             }
+            eprintln!("[JOLT Stage 3] Transcript state AFTER Stage 3 (cache_openings done): {:02x?}", &self.transcript.debug_state()[0..8]);
         }
 
         Ok(())
@@ -381,7 +391,9 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     }
 
     fn verify_stage5(&mut self) -> Result<(), anyhow::Error> {
+        eprintln!("[ZOLT-DEBUG] verify_stage5 ENTERED, trace_length={}", self.proof.trace_length);
         let n_cycle_vars = self.proof.trace_length.log_2();
+        eprintln!("[ZOLT-DEBUG] n_cycle_vars={}, polys_len={}", n_cycle_vars, self.proof.stage5_sumcheck_proof.compressed_polys.len());
         let registers_val_evaluation =
             RegistersValEvaluationSumcheckVerifier::new(&self.opening_accumulator);
         let ram_ra_reduction = RamRaClaimReductionSumcheckVerifier::new(
@@ -396,6 +408,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             &self.opening_accumulator,
             &mut self.transcript,
         );
+        eprintln!("[ZOLT-DEBUG] Stage 5 instances created, about to call BatchedSumcheck::verify");
 
         let _r_stage5 = BatchedSumcheck::verify(
             &self.proof.stage5_sumcheck_proof,

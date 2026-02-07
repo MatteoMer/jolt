@@ -322,6 +322,36 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftSumche
         let eq_plus_one_r_product_at_shift =
             EqPlusOnePolynomial::<F>::new(self.params.r_product.r.to_vec()).evaluate(&r.r);
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            unexpanded_pc_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] unexpanded_pc_claim (LE) = {:02x?}", &bytes);
+            pc_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] pc_claim (LE) = {:02x?}", &bytes);
+            is_virtual_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] is_virtual_claim (LE) = {:02x?}", &bytes);
+            is_first_in_sequence_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] is_first_in_sequence_claim (LE) = {:02x?}", &bytes);
+            is_noop_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] is_noop_claim (LE) = {:02x?}", &bytes);
+            eq_plus_one_r_outer_at_shift.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] eq+1_outer (LE) = {:02x?}", &bytes);
+            eq_plus_one_r_product_at_shift.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift expected_output] eq+1_product (LE) = {:02x?}", &bytes);
+            eprintln!("[JOLT Shift expected_output] r.r.len() = {}, r.r[0..min(4,len)] (LE):", r.r.len());
+            for i in 0..std::cmp::min(4, r.r.len()) {
+                r.r[i].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r[{}] = {:02x?}", i, &bytes);
+            }
+            eprintln!("[JOLT Shift expected_output] params.r_outer.r.len() = {}, r_outer.r[0..min(4,len)] (LE):", self.params.r_outer.r.len());
+            for i in 0..std::cmp::min(4, self.params.r_outer.r.len()) {
+                self.params.r_outer.r[i].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_outer[{}] = {:02x?}", i, &bytes);
+            }
+        }
+
         let result = [
             unexpanded_pc_claim,
             pc_claim,
@@ -665,6 +695,8 @@ impl<F: JoltField> Phase2State<F> {
         } = EqPlusOnePrefixSuffixPoly::new(&params.r_outer);
         let prefix_0_eval = MultilinearPolynomial::from(prefix_0).evaluate(&r_prefix.r);
         let prefix_1_eval = MultilinearPolynomial::from(prefix_1).evaluate(&r_prefix.r);
+        #[cfg(feature = "zolt-debug")]
+        let (prefix_0_eval_r_outer, prefix_1_eval_r_outer) = (prefix_0_eval, prefix_1_eval);
         let eq_plus_one_r_outer: MultilinearPolynomial<F> = (0..suffix_0.len())
             .map(|i| prefix_0_eval * suffix_0[i] + prefix_1_eval * suffix_1[i])
             .collect::<Vec<F>>()
@@ -679,6 +711,8 @@ impl<F: JoltField> Phase2State<F> {
         } = EqPlusOnePrefixSuffixPoly::new(&params.r_product);
         let prefix_0_eval = MultilinearPolynomial::from(prefix_0).evaluate(&r_prefix.r);
         let prefix_1_eval = MultilinearPolynomial::from(prefix_1).evaluate(&r_prefix.r);
+        #[cfg(feature = "zolt-debug")]
+        let (prefix_0_eval_r_product, prefix_1_eval_r_product) = (prefix_0_eval, prefix_1_eval);
         let eq_plus_one_r_product: MultilinearPolynomial<F> = (0..suffix_0.len())
             .map(|i| prefix_0_eval * suffix_0[i] + prefix_1_eval * suffix_1[i])
             .collect::<Vec<F>>()
@@ -745,6 +779,32 @@ impl<F: JoltField> Phase2State<F> {
                     *is_noop_eval = F::from_barrett_reduce(is_noop_eval_unreduced);
                 },
             );
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+
+            // eq_evals prefix weighting
+            eq_evals[0].serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift Phase2] eq_evals[0] (LE) = {:02x?}", &bytes);
+            eq_evals[1].serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift Phase2] eq_evals[1] (LE) = {:02x?}", &bytes);
+
+            // prefix evals for r_outer
+            prefix_0_eval_r_outer.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift Phase2] prefix_0_eval (r_outer) (LE) = {:02x?}", &bytes);
+            prefix_1_eval_r_outer.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift Phase2] prefix_1_eval (r_outer) (LE) = {:02x?}", &bytes);
+
+            // prefix evals for r_product
+            prefix_0_eval_r_product.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift Phase2] prefix_0_eval (r_product) (LE) = {:02x?}", &bytes);
+            prefix_1_eval_r_product.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Shift Phase2] prefix_1_eval (r_product) (LE) = {:02x?}", &bytes);
+
+            // Phase 2 eq+1 and witness MLE debug removed (MultilinearPolynomial not indexable)
+        }
 
         Self {
             unexpanded_pc_poly: unexpanded_pc_poly.into(),

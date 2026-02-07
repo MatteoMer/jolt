@@ -420,6 +420,12 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
     pub fn Q_len(&self) -> usize {
         self.Q[0].len()
     }
+
+    /// Debug accessor for Q array values (for Zolt-Jolt comparison testing)
+    #[cfg(feature = "zolt-debug")]
+    pub fn debug_Q(&self, idx: usize) -> &DensePolynomial<F> {
+        &self.Q[idx]
+    }
 }
 
 impl<F: JoltField> PrefixSuffixDecomposition<F, 2> {

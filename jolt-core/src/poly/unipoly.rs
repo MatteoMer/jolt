@@ -453,6 +453,82 @@ impl<F: JoltField> CompressedUniPoly<F> {
 
         let mut running_point: F = (*x).into();
         let mut running_sum = self.coeffs_except_linear_term[0] + *x * linear_term;
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            // Only print for last round (when coeffs len is 3 which is degree 3)
+            if self.coeffs_except_linear_term.len() >= 2 {
+                let c0 = self.coeffs_except_linear_term[0];
+                let c2 = self.coeffs_except_linear_term.get(1).cloned().unwrap_or(F::zero());
+                let c3 = self.coeffs_except_linear_term.get(2).cloned().unwrap_or(F::zero());
+                let mut hint_bytes = [0u8; 32];
+                let mut c0_bytes = [0u8; 32];
+                let mut c2_bytes = [0u8; 32];
+                let mut lt_bytes = [0u8; 32];
+                let mut x_bytes = [0u8; 32];
+                let mut rp_bytes = [0u8; 32];
+                let mut rs_bytes = [0u8; 32];
+                hint.serialize_compressed(&mut hint_bytes[..]).ok();
+                c0.serialize_compressed(&mut c0_bytes[..]).ok();
+                c2.serialize_compressed(&mut c2_bytes[..]).ok();
+                linear_term.serialize_compressed(&mut lt_bytes[..]).ok();
+                let x_f: F = (*x).into();
+                x_f.serialize_compressed(&mut x_bytes[..]).ok();
+                running_point.serialize_compressed(&mut rp_bytes[..]).ok();
+                running_sum.serialize_compressed(&mut rs_bytes[..]).ok();
+                // Check if this is round 0 or round 135 by checking hint value matches
+                // Round 0: hint starts with 4f c0 f2 28 (Stage 5 initial claim)
+                let is_round_0 = hint_bytes[0] == 0x4f && hint_bytes[1] == 0xc0 && hint_bytes[2] == 0xf2;
+                let is_round_135 = hint_bytes[0] == 0xf4 && hint_bytes[1] == 0x28;
+                if is_round_0 {
+                    eprintln!("[EVAL_FROM_HINT DEBUG] Round 0:");
+                    eprintln!("  coeffs_except_linear_term.len(): {}", self.coeffs_except_linear_term.len());
+                    for (idx, coeff) in self.coeffs_except_linear_term.iter().enumerate() {
+                        let mut coeff_bytes = [0u8; 32];
+                        coeff.serialize_compressed(&mut coeff_bytes[..]).ok();
+                        eprintln!("  coeffs[{}]: {:02x?}", idx, &coeff_bytes);
+                    }
+                    eprintln!("  hint: {:02x?}", &hint_bytes);
+                    eprintln!("  c0:   {:02x?}", &c0_bytes);
+                    eprintln!("  c2:   {:02x?}", &c2_bytes);
+                    eprintln!("  linear_term (c1): {:02x?}", &lt_bytes);
+                    eprintln!("  x (as F): {:02x?}", &x_bytes);
+                    eprintln!("  running_point (x): {:02x?}", &rp_bytes);
+                    eprintln!("  running_sum (c0 + x*c1): {:02x?}", &rs_bytes);
+
+                    // Compute and print c1*x
+                    let c1_times_x = *x * linear_term;
+                    let mut c1x_bytes = [0u8; 32];
+                    c1_times_x.serialize_compressed(&mut c1x_bytes[..]).ok();
+                    eprintln!("  c1 * x: {:02x?}", &c1x_bytes);
+
+                    // Compute c2 * x^2
+                    let x_squared: F = running_point * x;
+                    let c2_times_x2 = c2 * x_squared;
+                    let mut c2x2_bytes = [0u8; 32];
+                    c2_times_x2.serialize_compressed(&mut c2x2_bytes[..]).ok();
+                    eprintln!("  c2 * x^2: {:02x?}", &c2x2_bytes);
+                }
+                if is_round_135 {
+                    eprintln!("[EVAL_FROM_HINT DEBUG] Round 135:");
+                    eprintln!("  coeffs_except_linear_term.len(): {}", self.coeffs_except_linear_term.len());
+                    for (idx, coeff) in self.coeffs_except_linear_term.iter().enumerate() {
+                        let mut coeff_bytes = [0u8; 32];
+                        coeff.serialize_compressed(&mut coeff_bytes[..]).ok();
+                        eprintln!("  coeffs[{}]: {:02x?}", idx, &coeff_bytes);
+                    }
+                    eprintln!("  hint: {:02x?}", &hint_bytes);
+                    eprintln!("  c0:   {:02x?}", &c0_bytes);
+                    eprintln!("  c2:   {:02x?}", &c2_bytes);
+                    eprintln!("  linear_term: {:02x?}", &lt_bytes);
+                    eprintln!("  x (as F): {:02x?}", &x_bytes);
+                    eprintln!("  running_point (x): {:02x?}", &rp_bytes);
+                    eprintln!("  running_sum (after init): {:02x?}", &rs_bytes);
+                }
+            }
+        }
+
         for i in 1..self.coeffs_except_linear_term.len() {
             running_point = running_point * x;
             running_sum += self.coeffs_except_linear_term[i] * running_point;
@@ -477,6 +553,16 @@ impl<F: JoltField> AppendToTranscript for UniPoly<F> {
 
 impl<F: JoltField> AppendToTranscript for CompressedUniPoly<F> {
     fn append_to_transcript<ProofTranscript: Transcript>(&self, transcript: &mut ProofTranscript) {
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[JOLT TRANSCRIPT DEBUG] About to append_to_transcript with {} coeffs", self.coeffs_except_linear_term.len());
+            for (i, c) in self.coeffs_except_linear_term.iter().enumerate() {
+                let mut c_bytes = [0u8; 32];
+                c.serialize_compressed(&mut c_bytes[..]).ok();
+                eprintln!("[JOLT TRANSCRIPT DEBUG]   coeff[{}] (LE) = {:02x?}", i, &c_bytes);
+            }
+        }
         transcript.append_message(b"UniPoly_begin");
         for i in 0..self.coeffs_except_linear_term.len() {
             transcript.append_scalar(&self.coeffs_except_linear_term[i]);

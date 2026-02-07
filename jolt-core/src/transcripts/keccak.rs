@@ -252,6 +252,11 @@ impl Transcript for KeccakTranscript {
         }
         q_powers
     }
+
+    #[cfg(feature = "zolt-debug")]
+    fn debug_state(&self) -> [u8; 32] {
+        self.state
+    }
 }
 
 #[cfg(test)]

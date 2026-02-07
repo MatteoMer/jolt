@@ -490,13 +490,27 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
         polynomial: VirtualPolynomial,
         sumcheck: SumcheckId,
     ) -> (OpeningPoint<BIG_ENDIAN, F>, F) {
+        let key = OpeningId::Polynomial(
+            PolynomialId::Virtual(polynomial),
+            sumcheck,
+        );
         let (point, claim) = self
             .openings
-            .get(&OpeningId::Polynomial(
-                PolynomialId::Virtual(polynomial),
-                sumcheck,
-            ))
+            .get(&key)
             .unwrap_or_else(|| panic!("No opening found for {sumcheck:?} {polynomial:?}"));
+        #[cfg(feature = "zolt-debug")]
+        if polynomial == VirtualPolynomial::RamVal && sumcheck == SumcheckId::RamReadWriteChecking {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[GET_VIRTUAL] RamVal/RamReadWriteChecking retrieved:");
+            eprintln!("  point.r.len() = {}", point.r.len());
+            if point.r.len() >= 4 {
+                for i in 0..4 {
+                    let mut r_bytes = [0u8; 32];
+                    point.r[i].serialize_compressed(&mut r_bytes[..]).ok();
+                    eprintln!("  point.r[{}] = {:02x?}", i, &r_bytes);
+                }
+            }
+        }
         (point.clone(), *claim)
     }
 
@@ -613,6 +627,25 @@ where
             #[cfg(feature = "zolt-debug")]
             {
                 use ark_serialize::CanonicalSerialize;
+                // Debug Stage 3 cache_openings claims
+                if sumcheck == SumcheckId::SpartanShift
+                    || sumcheck == SumcheckId::InstructionInputVirtualization
+                    || sumcheck == SumcheckId::RegistersClaimReduction
+                {
+                    let mut claim_bytes = [0u8; 32];
+                    claim.serialize_compressed(&mut claim_bytes[..]).ok();
+                    eprintln!("[Stage3 append_virtual] {:?}/{:?} claim (LE) = {:02x?}",
+                        polynomial, sumcheck, &claim_bytes[0..16]);
+                }
+                if polynomial == VirtualPolynomial::RamVal && sumcheck == SumcheckId::RamReadWriteChecking {
+                    eprintln!("[APPEND_VIRTUAL] RamVal/RamReadWriteChecking storing:");
+                    eprintln!("  opening_point.r.len() = {}", opening_point.r.len());
+                    for (i, r) in opening_point.r.iter().enumerate().take(4) {
+                        let mut r_bytes = [0u8; 32];
+                        r.serialize_compressed(&mut r_bytes[..]).ok();
+                        eprintln!("  opening_point.r[{}] = {:02x?}", i, &r_bytes);
+                    }
+                }
                 if sumcheck == SumcheckId::InstructionClaimReduction {
                     eprintln!("append_virtual: {:?} {:?}", polynomial, sumcheck);
                     eprintln!("  opening_point.r.len() = {}", opening_point.r.len());

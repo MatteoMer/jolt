@@ -3,8 +3,15 @@ name = "fibonacci"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+zolt-debug = ["jolt-sdk/zolt-debug"]
+
 [dependencies]
 jolt-sdk = { workspace = true, features = ["host"] }
+jolt-core = { workspace = true }
+tracer = { workspace = true }
+ark-serialize = { workspace = true }
 tracing-subscriber.workspace = true
 tracing.workspace = true
 guest = { package = "fibonacci-guest", path = "./guest" }

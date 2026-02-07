@@ -519,10 +519,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         {
             use ark_serialize::CanonicalSerialize;
             eprintln!("[InstructionClaimReduction] After normalize_opening_point:");
-            for (i, r) in opening_point.r.iter().enumerate().take(3) {
+            for (i, r) in opening_point.r.iter().enumerate() {
                 let mut r_bytes = [0u8; 32];
                 r.serialize_compressed(&mut r_bytes[..]).ok();
-                eprintln!("  opening_point.r[{}] = {:02x?}", i, &r_bytes);
+                eprintln!("  opening_point.r[{}] = {:02x?}", i, &r_bytes[16..]);
             }
         }
 

@@ -85,6 +85,10 @@ impl<F: JoltField> RegistersReadWriteCheckingParams<F> {
         transcript: &mut impl Transcript,
         config: &ReadWriteConfig,
     ) -> Self {
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("[JOLT STAGE4] About to sample gamma from transcript");
+        }
         let gamma = transcript.challenge_scalar::<F>();
         let (r_cycle, _) = opening_accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::RdWriteValue,
@@ -99,6 +103,11 @@ impl<F: JoltField> RegistersReadWriteCheckingParams<F> {
             eprintln!("  LOG_K = {}", LOG_K);
             eprintln!("  num_rounds = {} + {} = {}", LOG_K, trace_length.ilog2(), LOG_K + trace_length.ilog2() as usize);
             eprintln!("  r_cycle.len() = {}", r_cycle.len());
+            // Print gamma bytes for comparison with Zolt
+            use ark_serialize::CanonicalSerialize;
+            let mut gamma_bytes = [0u8; 32];
+            gamma.serialize_compressed(&mut gamma_bytes[..]).ok();
+            eprintln!("  [STAGE4] gamma_bytes (LE from ark) = {:02x?}", &gamma_bytes);
         }
         Self {
             gamma,
@@ -144,6 +153,23 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersReadWriteCheckingParam
         );
         // TODO: Make error and move to more appropriate place.
         assert_eq!(rs2_rv_claim, rs2_rv_claim_instruction_input);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            rd_wv_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[STAGE4 INPUT_CLAIM] rd_wv_claim (LE) = {:02x?}", &bytes);
+            rs1_rv_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[STAGE4 INPUT_CLAIM] rs1_rv_claim (LE) = {:02x?}", &bytes);
+            rs2_rv_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[STAGE4 INPUT_CLAIM] rs2_rv_claim (LE) = {:02x?}", &bytes);
+            self.gamma.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[STAGE4 INPUT_CLAIM] gamma (LE) = {:02x?}", &bytes);
+            let result = rd_wv_claim + self.gamma * (rs1_rv_claim + self.gamma * rs2_rv_claim);
+            result.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[STAGE4 INPUT_CLAIM] result = rd_wv + gamma*(rs1 + gamma*rs2) (LE) = {:02x?}", &bytes);
+        }
 
         rd_wv_claim + self.gamma * (rs1_rv_claim + self.gamma * rs2_rv_claim)
     }

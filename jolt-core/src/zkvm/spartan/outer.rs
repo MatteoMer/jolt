@@ -139,6 +139,20 @@ impl<F: JoltField> OuterUniSkipProver<F> {
             &params.tau,
         );
 
+        // DEBUG: Print extended_evals for comparison with Zolt
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[JOLT] OuterUniSkipProver extended_evals (tau.len={}):", params.tau.len());
+            eprintln!("[JOLT]   trace.len={}", trace.len());
+            for (j, eval) in extended.iter().enumerate() {
+                let mut bytes = [0u8; 32];
+                eval.serialize_compressed(&mut bytes[..]).unwrap();
+                // Print in big-endian order to match Zolt's format
+                eprintln!("[JOLT]   extended_evals[{}] = {:02x?}", j, &bytes);
+            }
+        }
+
         let instance = Self {
             params,
             extended_evals: extended,
@@ -181,6 +195,28 @@ impl<F: JoltField> OuterUniSkipProver<F> {
 
         let num_x_in_bits = split_eq.E_in_current_len().log_2();
         let num_x_in_prime_bits = num_x_in_bits.saturating_sub(1); // ignore last bit (group index)
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let e_out_len = split_eq.E_out_current_len();
+            let e_in_len = split_eq.E_in_current_len();
+            eprintln!("[JOLT UNISKIP] E_out.len={}, E_in.len={}", e_out_len, e_in_len);
+            eprintln!("[JOLT UNISKIP] num_x_in_bits={}, num_x_in_prime_bits={}", num_x_in_bits, num_x_in_prime_bits);
+            // Print first E_out and E_in values
+            let e_out = split_eq.E_out_current();
+            if !e_out.is_empty() {
+                let mut bytes = [0u8; 32];
+                e_out[0].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("[JOLT UNISKIP] E_out[0] = {:02x?}", &bytes);
+            }
+            let e_in = split_eq.E_in_current();
+            if !e_in.is_empty() {
+                let mut bytes = [0u8; 32];
+                e_in[0].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("[JOLT UNISKIP] E_in[0] = {:02x?}", &bytes);
+            }
+        }
 
         split_eq
             .par_fold_out_in(
@@ -415,12 +451,32 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                 .1
         });
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[Stage1 expected_output_claim] r1cs_input_evals (first 5):");
+            for i in 0..5 {
+                let eval = &r1cs_input_evals[i];
+                let mut bytes = [0u8; 32];
+                eval.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  [{}]: {:02x?}", i, &bytes);
+            }
+        }
+
         // Randomness used to bind the rows of R1CS matrices A,B.
         let rx_constr = &[sumcheck_challenges[0], self.params.r0];
         // Compute sum_y A(rx_constr, y)*z(y) * sum_y B(rx_constr, y)*z(y).
         let inner_sum_prod = self
             .key
             .evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            inner_sum_prod.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[Stage1 expected_output_claim] inner_sum_prod: {:02x?}", &bytes);
+        }
 
         let tau = &self.params.tau;
         let tau_high = &tau[tau.len() - 1];
@@ -432,6 +488,23 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let r_tail_reversed: Vec<F::Challenge> =
             sumcheck_challenges.iter().rev().copied().collect();
         let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            tau_high_bound_r0.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[Stage1 expected_output_claim] tau_high_bound_r0: {:02x?}", &bytes);
+            tau_bound_r_tail_reversed.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[Stage1 expected_output_claim] tau_bound_r_tail_reversed: {:02x?}", &bytes);
+            let eq_factor = tau_high_bound_r0 * tau_bound_r_tail_reversed;
+            eq_factor.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[Stage1 expected_output_claim] eq_factor (tau_high * tau_low_bound): {:02x?}", &bytes);
+            let result = eq_factor * inner_sum_prod;
+            result.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[Stage1 expected_output_claim] result: {:02x?}", &bytes);
+        }
+
         tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
     }
 

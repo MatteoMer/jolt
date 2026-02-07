@@ -321,10 +321,41 @@ mod tests {
 
         // 2. Parse commitments
         println!("\n=== Parsing Commitments ===");
-        println!("Starting at byte: {}", cursor.position());
+        println!("Starting at byte: 0x{:x}", cursor.position());
+
+        // Read length first
+        let comm_len = {
+            use std::io::Read;
+            let mut len_bytes = [0u8; 8];
+            cursor.read_exact(&mut len_bytes).expect("read len");
+            u64::from_le_bytes(len_bytes)
+        };
+        println!("Commitments length: {}", comm_len);
+
+        // Try to parse each GT element
+        for i in 0..comm_len {
+            let pos = cursor.position();
+            println!("Parsing commitment {} at 0x{:x}", i, pos);
+            let gt: DoryCommitment = match DoryCommitment::deserialize_compressed(&mut cursor) {
+                Ok(g) => g,
+                Err(e) => {
+                    println!("Failed at commitment {} (byte 0x{:x}): {:?}", i, pos, e);
+                    let pos_usize = pos as usize;
+                    println!("Bytes: {:02x?}", &proof_bytes[pos_usize..std::cmp::min(pos_usize+50, proof_bytes.len())]);
+                    panic!("Failed at commitment");
+                }
+            };
+            if i < 3 {
+                println!("  Commitment {} OK", i);
+            }
+        }
+        println!("All {} commitments parsed OK, now at 0x{:x}", comm_len, cursor.position());
+
+        // Reset cursor and use Vec deserialize
+        cursor.set_position(cursor.position() - (comm_len * 384 + 8));
         let commitments: Vec<DoryCommitment> = match Vec::deserialize_compressed(&mut cursor) {
             Ok(c) => {
-                println!("Successfully parsed {} commitments", c.len());
+                println!("Successfully parsed {} commitments via Vec", c.len());
                 c
             },
             Err(e) => {
@@ -363,7 +394,121 @@ mod tests {
             }
         };
 
-        // Create full proof using dummy values for remaining fields if parsing succeeds this far
+        // Continue parsing all remaining fields
+        println!("\n=== Parsing Stage 2 UniSkip ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage2_uniskip: UniSkipFirstRoundProof<Fr, Blake2bTranscript> = match UniSkipFirstRoundProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage2 uniskip");
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage2 uniskip at byte 0x{:x}: {:?}", cursor.position(), e);
+                let pos = cursor.position() as usize;
+                println!("Bytes: {:02x?}", &proof_bytes[pos..std::cmp::min(pos+50, proof_bytes.len())]);
+                panic!("Failed at stage2 uniskip");
+            }
+        };
+
+        println!("\n=== Parsing Stage 2 Sumcheck ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage2_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage2 sumcheck with {} rounds", p.compressed_polys.len());
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage2 sumcheck at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at stage2 sumcheck");
+            }
+        };
+
+        println!("\n=== Parsing Stage 3 Sumcheck ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage3_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage3 sumcheck with {} rounds", p.compressed_polys.len());
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage3 sumcheck at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at stage3 sumcheck");
+            }
+        };
+
+        println!("\n=== Parsing Stage 4 Sumcheck ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage4_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage4 sumcheck with {} rounds", p.compressed_polys.len());
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage4 sumcheck at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at stage4 sumcheck");
+            }
+        };
+
+        println!("\n=== Parsing Stage 5 Sumcheck ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage5_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage5 sumcheck with {} rounds", p.compressed_polys.len());
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage5 sumcheck at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at stage5 sumcheck");
+            }
+        };
+
+        println!("\n=== Parsing Stage 6 Sumcheck ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage6_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage6 sumcheck with {} rounds", p.compressed_polys.len());
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage6 sumcheck at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at stage6 sumcheck");
+            }
+        };
+
+        println!("\n=== Parsing Stage 7 Sumcheck ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        let stage7_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed stage7 sumcheck with {} rounds", p.compressed_polys.len());
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse stage7 sumcheck at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at stage7 sumcheck");
+            }
+        };
+
+        println!("\n=== Parsing Joint Opening Proof ===");
+        println!("Starting at byte: 0x{:x}", cursor.position());
+        println!("Bytes at cursor: {:02x?}", &proof_bytes[cursor.position() as usize..std::cmp::min(cursor.position() as usize + 50, proof_bytes.len())]);
+
+        use crate::poly::commitment::dory::ArkDoryProof;
+        let opening_proof: ArkDoryProof = match ArkDoryProof::deserialize_compressed(&mut cursor) {
+            Ok(p) => {
+                println!("Successfully parsed opening proof");
+                p
+            },
+            Err(e) => {
+                println!("Failed to parse opening proof at byte 0x{:x}: {:?}", cursor.position(), e);
+                panic!("Failed at opening proof");
+            }
+        };
+
+        println!("\n=== All parsing succeeded! ===");
+        println!("Final cursor position: 0x{:x}", cursor.position());
+        println!("Bytes remaining: {}", proof_bytes.len() - cursor.position() as usize);
+
+        // Try full proof deserialization
         let proof = RV64IMACProof::deserialize_from_bytes(&proof_bytes)
             .expect("Failed to deserialize proof");
 
@@ -1057,26 +1202,95 @@ mod tests {
 fn test_from_bigint_unchecked_behavior() {
     use ark_bn254::Fr;
     use ark_ff::{BigInt, PrimeField};
-    
+    use ark_serialize::CanonicalSerialize;
+
     // Test: from_bigint_unchecked([0, 0, 1, 0])
     // This is how MontU128Challenge converts to Fr
     let bigint = BigInt::new([0, 0, 1, 0]);
     let fr = Fr::from_bigint_unchecked(bigint).unwrap();
-    
+
     println!("from_bigint_unchecked([0, 0, 1, 0]):");
     println!("  result = {:?}", fr);
     println!("  is_one = {}", fr == Fr::from(1u64));
-    
-    // If from_bigint_unchecked does NOT do Montgomery conversion,
-    // [0, 0, 1, 0] represents the Montgomery form of some value X
-    // where X = [0, 0, 1, 0] / R mod p
-    //
-    // If it DOES do Montgomery conversion (like from_bigint),
-    // [0, 0, 1, 0] represents the standard form of value = 1 * 2^128
-    
-    // Let's check: does [0, 0, 1, 0] become 1?
-    // For it to be 1, from_bigint_unchecked must treat [0, 0, 1, 0] as Montgomery form of 1
-    // But that's only true if Montgomery R = 2^128, which is likely NOT the case for BN254
-    
+
+    // Serialize and print the bytes
+    let mut bytes = [0u8; 32];
+    fr.serialize_compressed(&mut bytes[..]).unwrap();
+    println!("  serialized (LE): {:02x?}", bytes);
+
+    // Now test with a known challenge value
+    // Use the same value that appeared in our debug: low=0x0d8d89b0c0ef00b0, high=0x84a48a1b0b143407
+    let low: u64 = 0x0d8d89b0c0ef00b0;
+    let high: u64 = 0x84a48a1b0b143407;
+    let bigint2 = BigInt::new([0, 0, low, high]);
+    let fr2 = Fr::from_bigint_unchecked(bigint2).unwrap();
+
+    println!("\nfrom_bigint_unchecked([0, 0, {:#x}, {:#x}]):", low, high);
+    let mut bytes2 = [0u8; 32];
+    fr2.serialize_compressed(&mut bytes2[..]).unwrap();
+    println!("  serialized (LE): {:02x?}", bytes2);
+
+    // Compare with from_bigint (which does Montgomery conversion)
+    // Use a smaller value that fits: [low, high, 0, 0]
+    let bigint_small = BigInt::new([low, high, 0, 0]);
+    let fr3 = Fr::from_bigint(bigint_small).unwrap();
+    let mut bytes3 = [0u8; 32];
+    fr3.serialize_compressed(&mut bytes3[..]).unwrap();
+    println!("from_bigint([{:#x}, {:#x}, 0, 0]):", low, high);
+    println!("  serialized (LE): {:02x?}", bytes3);
+
+    // Now compare with from_bigint_unchecked([low, high, 0, 0])
+    let bigint_small_unchecked = BigInt::new([low, high, 0, 0]);
+    let fr4 = Fr::from_bigint_unchecked(bigint_small_unchecked).unwrap();
+    let mut bytes4 = [0u8; 32];
+    fr4.serialize_compressed(&mut bytes4[..]).unwrap();
+    println!("from_bigint_unchecked([{:#x}, {:#x}, 0, 0]):", low, high);
+    println!("  serialized (LE): {:02x?}", bytes4);
+
+    // For small values [low, high, 0, 0]:
+    // - from_bigint: input is standard form, output is that value in Montgomery form
+    // - from_bigint_unchecked: input IS Montgomery form, output is input/R in standard form when serialized
+    // So these should be DIFFERENT!
+    assert_ne!(bytes3, bytes4, "from_bigint and from_bigint_unchecked should differ for same input");
+
     assert!(fr != Fr::from(1u64), "from_bigint_unchecked should NOT equal Fr::from(1)");
+}
+
+#[test]
+fn test_zolt_gt_deserialization() {
+    use ark_serialize::CanonicalDeserialize;
+    use ark_bn254::Fq12;
+    use std::fs;
+    use std::path::Path;
+
+    let gt_path = "/tmp/zolt_gt_test.bin";
+    if !Path::new(gt_path).exists() {
+        println!("No GT test file at {}", gt_path);
+        return;
+    }
+
+    let gt_bytes = fs::read(gt_path).expect("read GT");
+    println!("GT bytes ({} bytes): {:02x?}", gt_bytes.len(), &gt_bytes[..32]);
+
+    // Try compressed deserialization
+    match Fq12::deserialize_compressed(&gt_bytes[..]) {
+        Ok(gt) => {
+            println!("Compressed deserialization OK!");
+            println!("GT value: {:?}", gt);
+        }
+        Err(e) => {
+            println!("Compressed deserialization FAILED: {:?}", e);
+        }
+    }
+
+    // Try uncompressed deserialization
+    match Fq12::deserialize_uncompressed(&gt_bytes[..]) {
+        Ok(gt) => {
+            println!("Uncompressed deserialization OK!");
+            println!("GT value: {:?}", gt);
+        }
+        Err(e) => {
+            println!("Uncompressed deserialization FAILED: {:?}", e);
+        }
+    }
 }

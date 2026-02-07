@@ -278,6 +278,22 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             SumcheckId::RegistersValEvaluation,
         );
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            fn to_bytes<T: CanonicalSerialize>(f: &T) -> Vec<u8> {
+                let mut buf = vec![];
+                f.serialize_compressed(&mut buf).ok();
+                buf
+            }
+            eprintln!("[RegistersValEvaluation] expected_output_claim debug:");
+            eprintln!("  inc_claim: {:02x?}", &to_bytes(&inc_claim)[..16]);
+            eprintln!("  wa_claim:  {:02x?}", &to_bytes(&wa_claim)[..16]);
+            eprintln!("  lt_eval:   {:02x?}", &to_bytes(&lt_eval)[..16]);
+            let result = inc_claim * wa_claim * lt_eval;
+            eprintln!("  result:    {:02x?}", &to_bytes(&result)[..16]);
+        }
+
         // Return inc_claim * wa_claim * lt_eval
         inc_claim * wa_claim * lt_eval
     }

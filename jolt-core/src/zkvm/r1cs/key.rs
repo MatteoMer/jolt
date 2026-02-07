@@ -117,6 +117,36 @@ impl<F: JoltField> UniformSpartanKey<F> {
         let az_final = az_g0 + r_stream * (az_g1 - az_g0);
         let bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0);
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut az_g0_bytes = [0u8; 32];
+            let mut bz_g0_bytes = [0u8; 32];
+            let mut az_g1_bytes = [0u8; 32];
+            let mut bz_g1_bytes = [0u8; 32];
+            let mut az_final_bytes = [0u8; 32];
+            let mut bz_final_bytes = [0u8; 32];
+            let mut r_stream_bytes = [0u8; 32];
+            let mut r0_bytes = [0u8; 32];
+            az_g0.serialize_compressed(&mut az_g0_bytes[..]).ok();
+            bz_g0.serialize_compressed(&mut bz_g0_bytes[..]).ok();
+            az_g1.serialize_compressed(&mut az_g1_bytes[..]).ok();
+            bz_g1.serialize_compressed(&mut bz_g1_bytes[..]).ok();
+            az_final.serialize_compressed(&mut az_final_bytes[..]).ok();
+            bz_final.serialize_compressed(&mut bz_final_bytes[..]).ok();
+            let r_stream_f: F = r_stream.into();
+            let r0_f: F = r0.into();
+            r_stream_f.serialize_compressed(&mut r_stream_bytes[..]).ok();
+            r0_f.serialize_compressed(&mut r0_bytes[..]).ok();
+            eprintln!("[inner_sum_prod] rx_constr: r_stream={:02x?}, r0={:02x?}", &r_stream_bytes[0..8], &r0_bytes[0..8]);
+            eprintln!("[inner_sum_prod] az_g0={:02x?}", &az_g0_bytes);
+            eprintln!("[inner_sum_prod] bz_g0={:02x?}", &bz_g0_bytes);
+            eprintln!("[inner_sum_prod] az_g1={:02x?}", &az_g1_bytes);
+            eprintln!("[inner_sum_prod] bz_g1={:02x?}", &bz_g1_bytes);
+            eprintln!("[inner_sum_prod] az_final={:02x?}", &az_final_bytes);
+            eprintln!("[inner_sum_prod] bz_final={:02x?}", &bz_final_bytes);
+        }
+
         az_final * bz_final
     }
 

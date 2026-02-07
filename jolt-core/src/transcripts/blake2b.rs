@@ -111,6 +111,15 @@ impl Transcript for Blake2bTranscript {
         // We require all messages to fit into one evm word and then right pad them
         // right padding matches the format of the strings when cast to bytes 32 in solidity
         assert!(msg.len() < 33);
+        #[cfg(feature = "zolt-debug")]
+        {
+            // Only print for UniPoly markers
+            if msg == b"UniPoly_begin" || msg == b"UniPoly_end"
+               || msg == b"UncompressedUniPoly_begin" || msg == b"UncompressedUniPoly_end" {
+                let msg_str = std::str::from_utf8(msg).unwrap_or("(invalid utf8)");
+                eprintln!("[JOLT TRANSCRIPT MSG] append_message({:?}), state BEFORE: {:02x?}", msg_str, &self.state[0..8]);
+            }
+        }
         let hasher = if msg.len() == 32 {
             self.hasher().chain_update(msg)
         } else {
@@ -120,6 +129,14 @@ impl Transcript for Blake2bTranscript {
         };
         // Instantiate hasher add our seed, position and msg
         self.update_state(hasher.finalize().into());
+        #[cfg(feature = "zolt-debug")]
+        {
+            if msg == b"UniPoly_begin" || msg == b"UniPoly_end"
+               || msg == b"UncompressedUniPoly_begin" || msg == b"UncompressedUniPoly_end" {
+                let msg_str = std::str::from_utf8(msg).unwrap_or("(invalid utf8)");
+                eprintln!("[JOLT TRANSCRIPT MSG] append_message({:?}), state AFTER: {:02x?}", msg_str, &self.state[0..8]);
+            }
+        }
     }
 
     fn append_bytes(&mut self, bytes: &[u8]) {
@@ -208,11 +225,29 @@ impl Transcript for Blake2bTranscript {
     }
 
     fn challenge_scalar_128_bits<F: JoltField>(&mut self) -> F {
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("[JOLT TRANSCRIPT] challenge_scalar state BEFORE: {{ {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} }}",
+                self.state[0], self.state[1], self.state[2], self.state[3],
+                self.state[4], self.state[5], self.state[6], self.state[7]);
+            eprintln!("[JOLT TRANSCRIPT] n_rounds BEFORE: {}", self.n_rounds);
+        }
         let mut buf = vec![0u8; 16];
         self.challenge_bytes(&mut buf);
 
         buf = buf.into_iter().rev().collect();
-        F::from_bytes(&buf)
+        let result = F::from_bytes(&buf);
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut result_bytes = [0u8; 32];
+            result.serialize_compressed(&mut result_bytes[..]).ok();
+            eprintln!("[JOLT TRANSCRIPT] challenge_scalar result bytes (LE): {:02x?}", &result_bytes);
+            eprintln!("[JOLT TRANSCRIPT] challenge_scalar state AFTER: {{ {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} }}",
+                self.state[0], self.state[1], self.state[2], self.state[3],
+                self.state[4], self.state[5], self.state[6], self.state[7]);
+        }
+        result
     }
 
     fn challenge_vector<F: JoltField>(&mut self, len: usize) -> Vec<F> {
@@ -266,6 +301,11 @@ impl Transcript for Blake2bTranscript {
             q_powers[i] = q * q_powers[i - 1]; // this is optimised
         }
         q_powers
+    }
+
+    #[cfg(feature = "zolt-debug")]
+    fn debug_state(&self) -> [u8; 32] {
+        self.state
     }
 }
 
@@ -326,5 +366,95 @@ mod tests {
             result_ref, result_regular,
             "Reference multiplication mismatch"
         );
+    }
+
+    #[test]
+    fn test_challenge_limbs_for_zolt_compat() {
+        use ark_ff::PrimeField;
+        use ark_serialize::CanonicalSerialize;
+
+        let mut transcript = Blake2bTranscript::new(b"zolt_compat_test");
+        transcript.append_message(b"test_data");
+
+        // Get the raw u128 challenge value
+        let mut transcript2 = Blake2bTranscript::new(b"zolt_compat_test");
+        transcript2.append_message(b"test_data");
+        let raw_u128 = transcript2.challenge_u128();
+
+        // Get the MontU128Challenge
+        let challenge = transcript.challenge_scalar_optimized::<Fr>();
+
+        // Convert to Fr to get the internal limbs
+        let fr: Fr = challenge.into();
+
+        // Get the Montgomery representation as bytes
+        let mut fr_bytes = [0u8; 32];
+        fr.serialize_compressed(&mut fr_bytes[..]).unwrap();
+
+        println!("\n=== CHALLENGE LIMBS TEST FOR ZOLT COMPATIBILITY ===");
+        println!("Raw u128 value: 0x{:032x}", raw_u128);
+        println!("  low:  0x{:016x}", raw_u128 as u64);
+        println!("  high: 0x{:016x}", (raw_u128 >> 64) as u64);
+        println!("MontU128Challenge limbs: [0, 0, 0x{:016x}, 0x{:016x}]", challenge.low, challenge.high);
+        println!("Fr bytes (serialized): {:02x?}", &fr_bytes);
+
+        // Get the BigInt representation
+        let bigint = fr.into_bigint();
+        println!("Fr BigInt limbs: [0x{:016x}, 0x{:016x}, 0x{:016x}, 0x{:016x}]",
+            bigint.0[0], bigint.0[1], bigint.0[2], bigint.0[3]);
+
+        // Verify the MontU128Challenge matches the raw values
+        assert_eq!(challenge.low, raw_u128 as u64);
+        assert_eq!(challenge.high, ((raw_u128 >> 64) as u64) & (u64::MAX >> 3)); // 125-bit mask
+
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_eq_poly_operations_for_zolt_compat() {
+        use ark_ff::PrimeField;
+        use ark_ff::One;
+        use ark_serialize::CanonicalSerialize;
+
+        let mut transcript = Blake2bTranscript::new(b"zolt_compat_test");
+        transcript.append_message(b"test_data");
+
+        let challenge = transcript.challenge_scalar_optimized::<Fr>();
+        let fr_challenge: Fr = challenge.into();
+
+        println!("\n=== EQ POLY OPERATIONS TEST FOR ZOLT COMPATIBILITY ===");
+        println!("Challenge as Fr BigInt: [{:016x}, {:016x}, {:016x}, {:016x}]",
+            fr_challenge.into_bigint().0[0], fr_challenge.into_bigint().0[1],
+            fr_challenge.into_bigint().0[2], fr_challenge.into_bigint().0[3]);
+
+        // F::one() - challenge
+        let one = Fr::one();
+        let one_minus_challenge = one - fr_challenge;
+
+        let mut one_bytes = [0u8; 32];
+        let mut challenge_bytes = [0u8; 32];
+        let mut result_bytes = [0u8; 32];
+
+        one.serialize_compressed(&mut one_bytes[..]).unwrap();
+        fr_challenge.serialize_compressed(&mut challenge_bytes[..]).unwrap();
+        one_minus_challenge.serialize_compressed(&mut result_bytes[..]).unwrap();
+
+        // Reverse for BE display
+        one_bytes.reverse();
+        challenge_bytes.reverse();
+        result_bytes.reverse();
+
+        println!("F::one() BE bytes: {:02x?}", &one_bytes);
+        println!("challenge BE bytes: {:02x?}", &challenge_bytes);
+        println!("1 - challenge BE bytes: {:02x?}", &result_bytes);
+
+        // challenge * challenge
+        let challenge_squared = fr_challenge * fr_challenge;
+        let mut sq_bytes = [0u8; 32];
+        challenge_squared.serialize_compressed(&mut sq_bytes[..]).unwrap();
+        sq_bytes.reverse();
+        println!("challenge^2 BE bytes: {:02x?}", &sq_bytes);
+
+        println!("=== END TEST ===\n");
     }
 }

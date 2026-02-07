@@ -465,7 +465,32 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             SumcheckId::RegistersClaimReduction,
         );
 
-        EqPolynomial::mle(&opening_point.r, &r_spartan.r)
+        let eq_eval = EqPolynomial::mle(&opening_point.r, &r_spartan.r);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            rd_write_value_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Reg expected_output] rd_write_value (LE) = {:02x?}", &bytes);
+            rs1_read_value_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Reg expected_output] rs1_value (LE) = {:02x?}", &bytes);
+            rs2_read_value_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Reg expected_output] rs2_value (LE) = {:02x?}", &bytes);
+            eq_eval.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT Reg expected_output] eq(opening_point, r_spartan) (LE) = {:02x?}", &bytes);
+            eprintln!("[JOLT Reg expected_output] opening_point.r.len() = {}, r_spartan.r.len() = {}", opening_point.r.len(), r_spartan.r.len());
+            for i in 0..std::cmp::min(4, opening_point.r.len()) {
+                opening_point.r[i].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  opening_point[{}] = {:02x?}", i, &bytes);
+            }
+            for i in 0..std::cmp::min(4, r_spartan.r.len()) {
+                r_spartan.r[i].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_spartan[{}] = {:02x?}", i, &bytes);
+            }
+        }
+
+        eq_eval
             * (rd_write_value_claim
                 + self.params.gamma * rs1_read_value_claim
                 + self.params.gamma_sqr * rs2_read_value_claim)

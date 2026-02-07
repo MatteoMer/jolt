@@ -500,6 +500,17 @@ pub fn eval_initial_ram_mle<F: JoltField>(
         &program_io.memory_layout,
     )
     .unwrap() as usize;
+    #[cfg(feature = "zolt-debug")]
+    {
+        eprintln!("[eval_initial_ram_mle] min_bytecode_address = 0x{:x}", ram_preprocessing.min_bytecode_address);
+        eprintln!("[eval_initial_ram_mle] bytecode_start (remapped) = {}", bytecode_start);
+        eprintln!("[eval_initial_ram_mle] bytecode_words.len() = {}", ram_preprocessing.bytecode_words.len());
+        eprintln!("[eval_initial_ram_mle] program_io.inputs.len() = {}", program_io.inputs.len());
+        eprintln!("[eval_initial_ram_mle] r_address.len() = {}", r_address.len());
+        if !ram_preprocessing.bytecode_words.is_empty() {
+            eprintln!("[eval_initial_ram_mle] bytecode_words first 3: {:?}", &ram_preprocessing.bytecode_words[..std::cmp::min(3, ram_preprocessing.bytecode_words.len())]);
+        }
+    }
     let mut acc =
         sparse_eval_u64_block::<F>(bytecode_start, &ram_preprocessing.bytecode_words, r_address);
 

@@ -705,6 +705,30 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let result =
             eq_eval_cycle * ra_claim * (val_claim + self.params.gamma * (val_claim + inc_claim));
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut eq_bytes = vec![0u8; eq_eval_cycle.serialized_size(ark_serialize::Compress::No)];
+            eq_eval_cycle.serialize_uncompressed(&mut eq_bytes[..]).unwrap();
+            let mut ra_bytes = vec![0u8; ra_claim.serialized_size(ark_serialize::Compress::No)];
+            ra_claim.serialize_uncompressed(&mut ra_bytes[..]).unwrap();
+            let mut val_bytes = vec![0u8; val_claim.serialized_size(ark_serialize::Compress::No)];
+            val_claim.serialize_uncompressed(&mut val_bytes[..]).unwrap();
+            let mut inc_bytes = vec![0u8; inc_claim.serialized_size(ark_serialize::Compress::No)];
+            inc_claim.serialize_uncompressed(&mut inc_bytes[..]).unwrap();
+            let mut gamma_bytes = vec![0u8; self.params.gamma.serialized_size(ark_serialize::Compress::No)];
+            self.params.gamma.serialize_uncompressed(&mut gamma_bytes[..]).unwrap();
+            let mut result_bytes = vec![0u8; result.serialized_size(ark_serialize::Compress::No)];
+            result.serialize_uncompressed(&mut result_bytes[..]).unwrap();
+            eprintln!("[RWC expected_output_claim]");
+            eprintln!("  eq_eval_cycle = {:02x?}", &eq_bytes[..32]);
+            eprintln!("  ra_claim = {:02x?}", &ra_bytes[..32]);
+            eprintln!("  val_claim = {:02x?}", &val_bytes[..32]);
+            eprintln!("  inc_claim = {:02x?}", &inc_bytes[..32]);
+            eprintln!("  gamma = {:02x?}", &gamma_bytes[..32]);
+            eprintln!("  result = {:02x?}", &result_bytes[..32]);
+        }
+
         #[cfg(test)]
         {
             let claims = Self::input_output_claims();
@@ -741,6 +765,29 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             }
         }
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let log_k = self.params.K.log_2();
+            eprintln!("  [RWC cache_openings] opening_point.r.len() = {}", opening_point.r.len());
+            eprintln!("  [RWC cache_openings] log_k = {}", log_k);
+            let (r_address, r_cycle) = opening_point.split_at(log_k);
+            eprintln!("  [RWC cache_openings] r_address.r.len() = {}, r_cycle.r.len() = {}", r_address.r.len(), r_cycle.r.len());
+            eprintln!("  [RWC cache_openings] r_address (first 4) - as F:");
+            for (i, r) in r_address.r.iter().enumerate().take(4) {
+                let mut r_bytes = [0u8; 32];
+                let r_f: F = (*r).into();
+                r_f.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("    r_address[{}] as F: {:02x?}", i, &r_bytes);
+            }
+            eprintln!("  [RWC cache_openings] opening_point.r (first 4) - as F then serialize:");
+            for (i, r) in opening_point.r.iter().enumerate().take(4) {
+                let r_f: F = (*r).into();
+                let mut r_bytes = [0u8; 32];
+                r_f.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("    opening_point.r[{}] as F: {:02x?}", i, &r_bytes);
+            }
+        }
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::RamVal,

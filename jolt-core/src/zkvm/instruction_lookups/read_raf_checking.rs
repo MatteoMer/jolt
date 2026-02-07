@@ -121,6 +121,15 @@ impl<F: JoltField> InstructionReadRafSumcheckParams<F> {
         let gamma = transcript.challenge_scalar::<F>();
         let gamma_sqr = gamma.square();
         let phases = config::get_instruction_sumcheck_phases(n_cycle_vars);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut gamma_bytes = [0u8; 32];
+            gamma.serialize_compressed(&mut gamma_bytes[..]).ok();
+            eprintln!("[STAGE5] gamma_lookups_raf = {:02x?}", &gamma_bytes);
+        }
+
         let (r_reduction, _) = opening_accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::LookupOutput,
             SumcheckId::InstructionClaimReduction,
@@ -589,6 +598,31 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
             assert!(self.v.len().is_power_of_two());
             let n = LOG_K / self.params.ra_virtual_log_k_chunk;
             let chunk_size = self.v.len() / n;
+
+            #[cfg(feature = "zolt-debug")]
+            {
+                eprintln!("[JOLT RA_DEBUG] phases={}, n={}, chunk_size={}, log_m={}",
+                    self.params.phases, n, chunk_size, log_m);
+                // Print lookup index for cycle 0
+                if !self.lookup_indices.is_empty() {
+                    let v: u128 = self.lookup_indices[0].into();
+                    eprintln!("[JOLT RA_DEBUG] Cycle 0 lookup_index: 0x{:032x}", v);
+                    eprintln!("[JOLT RA_DEBUG]   k_hi=0x{:016x}, k_lo=0x{:016x}", (v >> 64) as u64, v as u64);
+                }
+                // Print expanding table values for first few entries
+                for (phase, table) in self.v.iter().enumerate() {
+                    if phase < 4 {
+                        use ark_serialize::CanonicalSerialize;
+                        let mut bytes0 = [0u8; 32];
+                        let mut bytes1 = [0u8; 32];
+                        table[0].serialize_compressed(&mut bytes0[..]).ok();
+                        table[1].serialize_compressed(&mut bytes1[..]).ok();
+                        eprintln!("[JOLT RA_DEBUG] expanding_table[{}]: v[0]={:02x?}, v[1]={:02x?}",
+                            phase, &bytes0[..16], &bytes1[..16]);
+                    }
+                }
+            }
+
             self.v
                 .chunks(chunk_size)
                 .enumerate()
@@ -597,8 +631,9 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
                     let res = self
                         .lookup_indices
                         .par_iter()
+                        .enumerate()
                         .with_min_len(1024)
-                        .map(|i| {
+                        .map(|(j, i)| {
                             // Hot path: compute ra_i(k_i, j) as a product of per-phase expanding-table
                             // values. This is performance sensitive, so we:
                             // - Convert `LookupBits` -> `u128` once per cycle
@@ -619,10 +654,36 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
                             let first_idx = ((v >> shift) as usize) & m_mask;
                             let mut acc = first[first_idx];
 
-                            for table in iter {
+                            #[cfg(feature = "zolt-debug")]
+                            if j == 0 && chunk_i < 2 {
+                                use ark_serialize::CanonicalSerialize;
+                                let mut bytes = [0u8; 32];
+                                acc.serialize_compressed(&mut bytes[..]).ok();
+                                eprintln!("[JOLT RA_DEBUG] j=0, chunk={}, phase_offset={}: shift={}, first_idx=0x{:x}, table_val={:02x?}",
+                                    chunk_i, phase_offset, shift, first_idx, &bytes[..16]);
+                            }
+
+                            for (table_idx, table) in iter.enumerate() {
                                 shift -= log_m;
                                 let idx = ((v >> shift) as usize) & m_mask;
                                 acc *= table[idx];
+
+                                #[cfg(feature = "zolt-debug")]
+                                if j == 0 && chunk_i < 2 {
+                                    use ark_serialize::CanonicalSerialize;
+                                    let mut bytes = [0u8; 32];
+                                    acc.serialize_compressed(&mut bytes[..]).ok();
+                                    eprintln!("[JOLT RA_DEBUG] j=0, chunk={}, table_idx={}: shift={}, idx=0x{:x}, acc={:02x?}",
+                                        chunk_i, table_idx + 1, shift, idx, &bytes[..16]);
+                                }
+                            }
+
+                            #[cfg(feature = "zolt-debug")]
+                            if j == 0 && chunk_i < 2 {
+                                use ark_serialize::CanonicalSerialize;
+                                let mut bytes = [0u8; 32];
+                                acc.serialize_compressed(&mut bytes[..]).ok();
+                                eprintln!("[JOLT RA_DEBUG] j=0, chunk={}: final ra_val={:02x?}", chunk_i, &bytes[..16]);
                             }
 
                             acc
@@ -687,10 +748,78 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
                         *val += raf_identity;
                     }
                 });
+
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                // Print RAF values used
+                let mut raf_i_bytes = [0u8; 32];
+                let mut raf_id_bytes = [0u8; 32];
+                raf_interleaved.serialize_compressed(&mut raf_i_bytes[..]).ok();
+                raf_identity.serialize_compressed(&mut raf_id_bytes[..]).ok();
+                eprintln!("[JOLT INIT_LOG_T] raf_interleaved = {:02x?}", &raf_i_bytes[..16]);
+                eprintln!("[JOLT INIT_LOG_T] raf_identity = {:02x?}", &raf_id_bytes[..16]);
+
+                // Print prefix checkpoints
+                let mut lp_bytes = [0u8; 32];
+                let mut rp_bytes = [0u8; 32];
+                let mut ip_bytes = [0u8; 32];
+                left_prefix.serialize_compressed(&mut lp_bytes[..]).ok();
+                right_prefix.serialize_compressed(&mut rp_bytes[..]).ok();
+                identity_prefix.serialize_compressed(&mut ip_bytes[..]).ok();
+                eprintln!("[JOLT INIT_LOG_T] left_prefix = {:02x?}", &lp_bytes[..16]);
+                eprintln!("[JOLT INIT_LOG_T] right_prefix = {:02x?}", &rp_bytes[..16]);
+                eprintln!("[JOLT INIT_LOG_T] identity_prefix = {:02x?}", &ip_bytes[..16]);
+
+                // Print first 5 combined_val and table_values
+                for j in 0..std::cmp::min(5, combined_val_poly.len()) {
+                    let mut cv_bytes = [0u8; 32];
+                    combined_val_poly[j].serialize_compressed(&mut cv_bytes[..]).ok();
+                    eprintln!("[JOLT INIT_LOG_T] j={}: combined_val={:02x?}", j, &cv_bytes[..16]);
+                }
+
+                // Print table_values_at_r_addr
+                for (t_idx, tv) in table_values_at_r_addr.iter().enumerate() {
+                    let mut tv_bytes = [0u8; 32];
+                    tv.serialize_compressed(&mut tv_bytes[..]).ok();
+                    if *tv != F::zero() {
+                        eprintln!("[JOLT INIT_LOG_T] table_values_at_r_addr[{}] = {:02x?}", t_idx, &tv_bytes[..16]);
+                    }
+                }
+            }
         }
 
         self.combined_val_polynomial = Some(MultilinearPolynomial::from(combined_val_poly));
         self.ra_polys = Some(ra_polys);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            // Compute materialized sum: Σ_j eq(j, r_reduction) * Π_c ra_c(j) * combined_val(j)
+            let eq_evals = EqPolynomial::evals(&self.params.r_reduction.r);
+            let ra_polys_ref = self.ra_polys.as_ref().unwrap();
+            let combined_val_ref = self.combined_val_polynomial.as_ref().unwrap();
+            let num_cycles = combined_val_ref.len();
+            let mut materialized_sum = F::zero();
+            let mut sum_no_ra = F::zero();
+            for j in 0..num_cycles {
+                let eq_j = eq_evals[j];
+                let cv_j = combined_val_ref.get_bound_coeff(j);
+                let mut ra_product = F::one();
+                for chunk in ra_polys_ref.iter() {
+                    ra_product *= chunk.get_bound_coeff(j);
+                }
+                materialized_sum += eq_j * ra_product * cv_j;
+                sum_no_ra += eq_j * cv_j;
+            }
+            let mut ms_bytes = [0u8; 32];
+            let mut snr_bytes = [0u8; 32];
+            materialized_sum.serialize_compressed(&mut ms_bytes[..]).ok();
+            sum_no_ra.serialize_compressed(&mut snr_bytes[..]).ok();
+            eprintln!("[JOLT INIT_LOG_T] materialized_sum (WITH ra_weights) = {:02x?}", &ms_bytes[..16]);
+            eprintln!("[JOLT INIT_LOG_T] sum_no_ra (WITHOUT ra_weights) = {:02x?}", &snr_bytes[..16]);
+            eprintln!("[JOLT INIT_LOG_T] num_cycles={}", num_cycles);
+        }
 
         // After the address rounds are complete and we have materialized `ra_polys` and the
         // `combined_val_polynomial`, the following buffers are no longer needed for the remaining
@@ -722,6 +851,34 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             // Phase 1: First log(K) rounds
             self.compute_prefix_suffix_prover_message(round, previous_claim)
         } else {
+            #[cfg(feature = "zolt-debug")]
+            if round == LOG_K {
+                use ark_serialize::CanonicalSerialize;
+                let mut claim_bytes = [0u8; 32];
+                previous_claim.serialize_compressed(&mut claim_bytes[..]).ok();
+                eprintln!("[JOLT CYCLE R0] previous_claim (at start of cycle rounds) = {:02x?}", &claim_bytes[..16]);
+
+                // Compute materialized_sum here to compare with claim
+                let eq_evals = EqPolynomial::evals(&self.params.r_reduction.r);
+                let ra_polys_ref = self.ra_polys.as_ref().unwrap();
+                let combined_val_ref = self.combined_val_polynomial.as_ref().unwrap();
+                let num_cycles = combined_val_ref.len();
+                let mut mat_sum = F::zero();
+                for j in 0..num_cycles {
+                    let eq_j = eq_evals[j];
+                    let cv_j = combined_val_ref.get_bound_coeff(j);
+                    let mut ra_prod = F::one();
+                    for chunk in ra_polys_ref.iter() {
+                        ra_prod *= chunk.get_bound_coeff(j);
+                    }
+                    mat_sum += eq_j * ra_prod * cv_j;
+                }
+                let match_claim = mat_sum == previous_claim;
+                let mut ms_bytes2 = [0u8; 32];
+                mat_sum.serialize_compressed(&mut ms_bytes2[..]).ok();
+                eprintln!("[JOLT CYCLE R0] materialized_sum = {:02x?}", &ms_bytes2[..16]);
+                eprintln!("[JOLT CYCLE R0] materialized_sum == previous_claim: {}", match_claim);
+            }
             let ra_polys = self.ra_polys.as_ref().unwrap();
             let combined_val = self.combined_val_polynomial.as_ref().unwrap();
             let n_evals = ra_polys.len() + 1;
@@ -770,7 +927,53 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
 
             let current_scalar = self.eq_r_reduction.get_current_scalar();
             sum_evals.iter_mut().for_each(|v| *v *= current_scalar);
-            finish_mles_product_sum_from_evals(&sum_evals, previous_claim, &self.eq_r_reduction)
+
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                let cycle_round = round - LOG_K;
+                eprintln!("[JOLT PROVER CYCLE] Round {} (cycle {}):", round, cycle_round);
+
+                // Print sum_evals before finishing
+                eprintln!("  sum_evals (after current_scalar mul):");
+                for (i, eval) in sum_evals.iter().enumerate().take(4) {
+                    let mut bytes = [0u8; 32];
+                    eval.serialize_compressed(&mut bytes[..]).ok();
+                    eprintln!("    [{}]: {:02x?}", i, &bytes[..16]);
+                }
+
+                // Print current_scalar
+                let mut cs_bytes = [0u8; 32];
+                current_scalar.serialize_compressed(&mut cs_bytes[..]).ok();
+                eprintln!("  current_scalar: {:02x?}", &cs_bytes[..16]);
+
+                // Print r_round (from eq_r_reduction)
+                let r_round = self.eq_r_reduction.get_current_w();
+                let mut r_bytes = [0u8; 32];
+                <F::Challenge as CanonicalSerialize>::serialize_compressed(&r_round, &mut r_bytes[..]).ok();
+                eprintln!("  r_round: {:02x?}", &r_bytes);
+
+                // Print previous_claim
+                let mut pc_bytes = [0u8; 32];
+                previous_claim.serialize_compressed(&mut pc_bytes[..]).ok();
+                eprintln!("  previous_claim: {:02x?}", &pc_bytes[..16]);
+            }
+
+            let poly = finish_mles_product_sum_from_evals(&sum_evals, previous_claim, &self.eq_r_reduction);
+
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                // Print resulting polynomial coefficients
+                eprintln!("  poly coeffs (first 4):");
+                for (i, coeff) in poly.coeffs.iter().enumerate().take(4) {
+                    let mut bytes = [0u8; 32];
+                    coeff.serialize_compressed(&mut bytes[..]).ok();
+                    eprintln!("    c[{}]: {:02x?}", i, &bytes[..16]);
+                }
+            }
+
+            poly
         }
     }
 
@@ -877,12 +1080,20 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             let r_address = r_address_chunks.next().unwrap();
             let opening_point =
                 OpeningPoint::<BIG_ENDIAN, F>::new([r_address, &*r_cycle.r].concat());
+            let ra_claim = ra_poly.final_sumcheck_claim();
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                let mut bytes = [0u8; 32];
+                ra_claim.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("[JOLT PROVER] InstructionRa({}) final_sumcheck_claim (LE): {:02x?}", i, &bytes);
+            }
             accumulator.append_virtual(
                 transcript,
                 VirtualPolynomial::InstructionRa(i),
                 SumcheckId::InstructionReadRaf,
                 opening_point,
-                ra_poly.final_sumcheck_claim(),
+                ra_claim,
             );
         }
 
@@ -922,6 +1133,36 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
         let eval_at_0 = read_checking[0] + raf[0];
         let eval_at_2 = read_checking[1] + raf[1];
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            {
+                let mut bytes_0 = [0u8; 32];
+                let mut bytes_2 = [0u8; 32];
+                let mut bytes_claim = [0u8; 32];
+                let mut bytes_rc0 = [0u8; 32];
+                let mut bytes_rc1 = [0u8; 32];
+                let mut bytes_raf0 = [0u8; 32];
+                let mut bytes_raf1 = [0u8; 32];
+                eval_at_0.serialize_compressed(&mut bytes_0[..]).ok();
+                eval_at_2.serialize_compressed(&mut bytes_2[..]).ok();
+                previous_claim.serialize_compressed(&mut bytes_claim[..]).ok();
+                read_checking[0].serialize_compressed(&mut bytes_rc0[..]).ok();
+                read_checking[1].serialize_compressed(&mut bytes_rc1[..]).ok();
+                raf[0].serialize_compressed(&mut bytes_raf0[..]).ok();
+                raf[1].serialize_compressed(&mut bytes_raf1[..]).ok();
+                let eval_at_1 = previous_claim - eval_at_0;
+                let mut bytes_1 = [0u8; 32];
+                eval_at_1.serialize_compressed(&mut bytes_1[..]).ok();
+                eprintln!("[JOLT INST2 R{}] previous_claim = {:02x?}", round, &bytes_claim[..16]);
+                eprintln!("[JOLT INST2 R{}] eval_at_0 = {:02x?}", round, &bytes_0[..16]);
+                eprintln!("[JOLT INST2 R{}] eval_at_1 = {:02x?}", round, &bytes_1[..16]);
+                eprintln!("[JOLT INST2 R{}] eval_at_2 = {:02x?}", round, &bytes_2[..16]);
+                eprintln!("[JOLT INST2 R{}] read_checking = [{:02x?}, {:02x?}]", round, &bytes_rc0[..16], &bytes_rc1[..16]);
+                eprintln!("[JOLT INST2 R{}] raf = [{:02x?}, {:02x?}]", round, &bytes_raf0[..16], &bytes_raf1[..16]);
+            }
+        }
+
         UniPoly::from_evals_and_hint(previous_claim, &[eval_at_0, eval_at_2])
     }
 
@@ -931,6 +1172,49 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
     /// (Left + γ·Right) vs Identity path, folding γ-weights into the result.
     fn prover_msg_raf(&self) -> [F; 2] {
         let len = self.identity_ps.Q_len();
+        let round = self.r.len();
+
+        // Debug: print Q sums at round 0 and 1
+        #[cfg(feature = "zolt-debug")]
+        if round == 0 || round == 1 {
+            use ark_serialize::CanonicalSerialize;
+            fn to_bytes<F: CanonicalSerialize>(f: &F) -> Vec<u8> {
+                let mut buf = vec![];
+                f.serialize_compressed(&mut buf).unwrap();
+                buf
+            }
+
+            // Compute Q sums for left, right, identity
+            let mut left_q0_sum = F::zero();
+            let mut left_q1_sum = F::zero();
+            let mut right_q0_sum = F::zero();
+            let mut right_q1_sum = F::zero();
+            let mut identity_q0_sum = F::zero();
+            let mut identity_q1_sum = F::zero();
+
+            for i in 0..len {
+                left_q0_sum += self.left_operand_ps.debug_Q(0)[i];
+                left_q1_sum += self.left_operand_ps.debug_Q(1)[i];
+                right_q0_sum += self.right_operand_ps.debug_Q(0)[i];
+                right_q1_sum += self.right_operand_ps.debug_Q(1)[i];
+                identity_q0_sum += self.identity_ps.debug_Q(0)[i];
+                identity_q1_sum += self.identity_ps.debug_Q(1)[i];
+            }
+
+            let to_be_hex = |f: &F| -> String {
+                let bytes = to_bytes(f);
+                let mut s = String::new();
+                for b in bytes.iter().rev().take(16) {
+                    s.push_str(&format!("{:02x}", b));
+                }
+                s
+            };
+
+            eprintln!("[JOLT_RAF R{}] Q_SUM: left[0]={}, left[1]={}", round, to_be_hex(&left_q0_sum), to_be_hex(&left_q1_sum));
+            eprintln!("[JOLT_RAF R{}] Q_SUM: right[0]={}, right[1]={}", round, to_be_hex(&right_q0_sum), to_be_hex(&right_q1_sum));
+            eprintln!("[JOLT_RAF R{}] Q_SUM: identity[0]={}, identity[1]={}", round, to_be_hex(&identity_q0_sum), to_be_hex(&identity_q1_sum));
+        }
+
         let [left_0, left_2, right_0, right_2] = (0..len / 2)
             .into_par_iter()
             .map(|b| {
@@ -963,16 +1247,15 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
                     ]
                 },
             );
-        [
-            F::from_montgomery_reduce(
-                left_0.mul_trunc::<4, 9>(self.params.gamma.as_unreduced_ref())
-                    + right_0.mul_trunc::<4, 9>(self.params.gamma_sqr.as_unreduced_ref()),
-            ),
-            F::from_montgomery_reduce(
-                left_2.mul_trunc::<4, 9>(self.params.gamma.as_unreduced_ref())
-                    + right_2.mul_trunc::<4, 9>(self.params.gamma_sqr.as_unreduced_ref()),
-            ),
-        ]
+        let raf_eval_0 = F::from_montgomery_reduce(
+            left_0.mul_trunc::<4, 9>(self.params.gamma.as_unreduced_ref())
+                + right_0.mul_trunc::<4, 9>(self.params.gamma_sqr.as_unreduced_ref()),
+        );
+        let raf_eval_2 = F::from_montgomery_reduce(
+            left_2.mul_trunc::<4, 9>(self.params.gamma.as_unreduced_ref())
+                + right_2.mul_trunc::<4, 9>(self.params.gamma_sqr.as_unreduced_ref()),
+        );
+        [raf_eval_0, raf_eval_2]
     }
 
     /// Read-checking part for address rounds.
@@ -1053,7 +1336,8 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
                 },
             )
             .map(F::from_barrett_reduce);
-        [eval_0, eval_2_right + eval_2_right - eval_2_left]
+        let result_eval_2 = eval_2_right + eval_2_right - eval_2_left;
+        [eval_0, result_eval_2]
     }
 
     /// Compute per-table flag claims and RAF flag claim using split-eq + unreduced accumulation.
@@ -1202,8 +1486,34 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         // Computes Val and RafVal contributions at r_address, forms EQ(r_cycle)
         // for InstructionClaimReduction sumcheck, multiplies by ra claim at r_sumcheck,
         // and returns the batched identity RHS to be matched against the LHS input claim.
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionReadRaf expected_output_claim] sumcheck_challenges.len={}", sumcheck_challenges.len());
+            // Print last 6 challenges (cycle variables)
+            let start = if sumcheck_challenges.len() > 6 { sumcheck_challenges.len() - 6 } else { 0 };
+            for i in start..sumcheck_challenges.len() {
+                let c = sumcheck_challenges[i];
+                let c_f: F = c.into();
+                let mut bytes = [0u8; 32];
+                c_f.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  sumcheck_challenges[{}] hi16: {:02x?}", i, &bytes[16..]);
+            }
+        }
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         let (r_address_prime, r_cycle_prime) = opening_point.split_at(LOG_K);
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionReadRaf expected_output_claim] after split:");
+            eprintln!("  r_cycle_prime.len = {}", r_cycle_prime.len());
+            for (i, r) in r_cycle_prime.r.iter().enumerate() {
+                let r_f: F = (*r).into();
+                let mut bytes = [0u8; 32];
+                r_f.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_cycle_prime[{}] hi16: {:02x?}", i, &bytes[16..]);
+            }
+        }
         let left_operand_eval =
             OperandPolynomial::<F>::new(LOG_K, OperandSide::Left).evaluate(&r_address_prime.r);
         let right_operand_eval =
@@ -1212,6 +1522,51 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let val_evals: Vec<_> = LookupTables::<XLEN>::iter()
             .map(|table| table.evaluate_mle::<F, F::Challenge>(&r_address_prime.r))
             .collect();
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+
+            // Debug: print first few r_address_prime values
+            eprintln!("[InstructionReadRaf] r_address_prime challenges (first 4 and last 4):");
+            for i in 0..4 {
+                let mut bytes = [0u8; 32];
+                r_address_prime.r[i].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r[{}] = {:02x?}", i, &bytes[16..]);
+            }
+            for i in 124..128 {
+                let mut bytes = [0u8; 32];
+                r_address_prime.r[i].serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r[{}] = {:02x?}", i, &bytes[16..]);
+            }
+
+            // Debug: print r[64] and r[65] which are used in first LowerWord update
+            eprintln!("[InstructionReadRaf] r[64] and r[65] (first LowerWord update):");
+            let mut bytes64 = [0u8; 32];
+            r_address_prime.r[64].serialize_compressed(&mut bytes64[..]).ok();
+            eprintln!("  r[64] = {:02x?}", &bytes64[16..]);
+            let mut bytes65 = [0u8; 32];
+            r_address_prime.r[65].serialize_compressed(&mut bytes65[..]).ok();
+            eprintln!("  r[65] = {:02x?}", &bytes65[16..]);
+            // Also print raw sumcheck_challenges[64]
+            let mut raw_bytes64 = [0u8; 32];
+            let raw_64: F = sumcheck_challenges[64].into();
+            raw_64.serialize_compressed(&mut raw_bytes64[..]).ok();
+            eprintln!("  sumcheck_challenges[64] (as F) = {:02x?}", &raw_bytes64[16..]);
+            // Print the Challenge directly
+            let mut raw_ch_bytes64 = [0u8; 32];
+            let ch_64_as_f: F = r_address_prime.r[64].into();
+            ch_64_as_f.serialize_compressed(&mut raw_ch_bytes64[..]).ok();
+            eprintln!("  r_address_prime.r[64] (as F) = {:02x?}", &raw_ch_bytes64[16..]);
+
+            eprintln!("[InstructionReadRaf] Table MLE evaluations at r_address_prime:");
+            for (i, eval) in val_evals.iter().enumerate() {
+                if i == 0 || i == 1 || i == 9 {  // Tables used by Fibonacci
+                    let mut bytes = [0u8; 32];
+                    eval.serialize_compressed(&mut bytes[..]).ok();
+                    eprintln!("  table_eval[{}] (FULL 32) = {:02x?}", i, &bytes);
+                }
+            }
+        }
 
         let r_reduction = accumulator
             .get_virtual_polynomial_opening(
@@ -1220,6 +1575,22 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             )
             .0
             .r;
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[InstructionReadRaf] r_reduction (all 8 elements):");
+            for (i, r) in r_reduction.iter().enumerate() {
+                let mut bytes = [0u8; 32];
+                r.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_reduction[{}] = {:02x?}", i, &bytes[16..]);
+            }
+            eprintln!("[InstructionReadRaf] r_cycle_prime (all 8 elements):");
+            for (i, r) in r_cycle_prime.r.iter().enumerate() {
+                let mut bytes = [0u8; 32];
+                r.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_cycle_prime[{}] = {:02x?}", i, &bytes[16..]);
+            }
+        }
         let eq_eval_r_reduction = EqPolynomial::<F>::mle(&r_reduction, &r_cycle_prime.r);
 
         let n_virtual_ra_polys = LOG_K / self.params.ra_virtual_log_k_chunk;
@@ -1236,14 +1607,21 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         #[cfg(feature = "zolt-debug")]
         {
             use ark_serialize::CanonicalSerialize;
-            eprintln!("[InstructionReadRaf] ra_chunk claims:");
+            eprintln!("[InstructionReadRaf] ra_chunk claims (FULL 32 bytes LE):");
             for (i, claim) in ra_claims.iter().enumerate() {
                 let mut bytes = [0u8; 32];
                 claim.serialize_compressed(&mut bytes[..]).ok();
-                eprintln!("  ra_claims[{}] = {:02x?}", i, &bytes[16..]);
+                eprintln!("  ra_claims[{}] = {:02x?}", i, &bytes);
             }
         }
-        let ra_claim: F = ra_claims.into_iter().product();
+        let ra_claim: F = ra_claims.clone().into_iter().product();
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut ra_product_bytes = [0u8; 32];
+            ra_claim.serialize_compressed(&mut ra_product_bytes[..]).ok();
+            eprintln!("[InstructionReadRaf] ra_claim PRODUCT (FULL 32 bytes LE) = {:02x?}", &ra_product_bytes);
+        }
 
         let table_flag_claims: Vec<F> = (0..LookupTables::<XLEN>::COUNT)
             .map(|i| {

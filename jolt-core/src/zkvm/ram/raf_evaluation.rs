@@ -325,7 +325,30 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("RamRafEvaluationVerifier::cache_openings debug:");
+            eprintln!("  sumcheck_challenges.len() = {}", sumcheck_challenges.len());
+            eprintln!("  params.log_K = {}", self.params.log_K);
+            for (i, c) in sumcheck_challenges.iter().enumerate().take(24) {
+                let mut c_bytes = [0u8; 32];
+                c.serialize_compressed(&mut c_bytes[..]).ok();
+                eprintln!("  sumcheck_challenges[{}]: {:02x?}", i, &c_bytes);
+            }
+        }
         let r_address = self.params.normalize_opening_point(sumcheck_challenges);
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("  r_address (after normalize_opening_point):");
+            for (i, r) in r_address.r.iter().enumerate().take(4) {
+                let mut r_bytes = [0u8; 32];
+                let r_f: F = (*r).into();
+                r_f.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("    r_address[{}]: {:02x?}", i, &r_bytes);
+            }
+        }
         let r_cycle = &self.params.r_cycle;
         let ra_opening_point = OpeningPoint::new([&*r_address.r, &*r_cycle.r].concat());
         accumulator.append_virtual(

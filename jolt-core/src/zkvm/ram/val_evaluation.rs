@@ -184,6 +184,20 @@ impl<F: JoltField> SumcheckInstanceParams<F> for ValEvaluationSumcheckParams<F> 
             VirtualPolynomial::RamVal,
             SumcheckId::RamReadWriteChecking,
         );
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut ce_bytes = [0u8; 32];
+            let mut ie_bytes = [0u8; 32];
+            let result = claimed_evaluation - self.init_eval;
+            let mut r_bytes = [0u8; 32];
+            claimed_evaluation.serialize_compressed(&mut ce_bytes[..]).ok();
+            self.init_eval.serialize_compressed(&mut ie_bytes[..]).ok();
+            result.serialize_compressed(&mut r_bytes[..]).ok();
+            eprintln!("[ValEval::input_claim] claimed_evaluation (RamVal@RWC) (LE) = {:02x?}", &ce_bytes);
+            eprintln!("[ValEval::input_claim] self.init_eval (LE) = {:02x?}", &ie_bytes);
+            eprintln!("[ValEval::input_claim] result (claimed - init) (LE) = {:02x?}", &r_bytes);
+        }
         claimed_evaluation - self.init_eval
     }
 
@@ -401,6 +415,22 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         {
             use ark_serialize::CanonicalSerialize;
             eprintln!("ValEvaluation expected_output_claim debug:");
+            eprintln!("  r.r.len() = {} (r_address + r_cycle)", r.r.len());
+            eprintln!("  r_cycle.r.len() = {}", r_cycle.r.len());
+            eprintln!("  r_cycle (from Stage 2 RamVal opening):");
+            for (i, rc) in r_cycle.r.iter().enumerate() {
+                let mut rc_bytes = [0u8; 32];
+                let rc_f: F = (*rc).into();
+                rc_f.serialize_compressed(&mut rc_bytes[..]).ok();
+                eprintln!("    r_cycle[{}]: {:02x?}", i, &rc_bytes[16..]);
+            }
+            eprintln!("  r (from Stage 4 sumcheck challenges, normalized):");
+            for (i, ri) in r.r.iter().enumerate() {
+                let mut ri_bytes = [0u8; 32];
+                let ri_f: F = (*ri).into();
+                ri_f.serialize_compressed(&mut ri_bytes[..]).ok();
+                eprintln!("    r[{}]: {:02x?}", i, &ri_bytes[16..]);
+            }
             let mut inc_bytes = [0u8; 32];
             inc_claim.serialize_compressed(&mut inc_bytes[..]).ok();
             eprintln!("  inc_claim: {:02x?}", &inc_bytes);

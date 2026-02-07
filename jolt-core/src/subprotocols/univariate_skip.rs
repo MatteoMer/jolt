@@ -179,14 +179,44 @@ impl<F: JoltField, T: Transcript> UniSkipFirstRoundProof<F, T> {
         }
 
         // Append full polynomial and derive r0
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[JOLT UNISKIP VERIFY] N={}, FIRST_ROUND_POLY_NUM_COEFFS={}, degree_bound={}", N, FIRST_ROUND_POLY_NUM_COEFFS, degree_bound);
+            eprintln!("[JOLT UNISKIP VERIFY] uni_poly.coeffs.len() = {}", proof.uni_poly.coeffs.len());
+            for (i, c) in proof.uni_poly.coeffs.iter().enumerate() {
+                let mut buf = [0u8; 32];
+                c.serialize_compressed(&mut buf[..]).ok();
+                eprintln!("[JOLT UNISKIP VERIFY]   coeff[{}] (LE) = {:02x?}", i, buf);
+            }
+        }
         proof.uni_poly.append_to_transcript(transcript);
         let r0 = transcript.challenge_scalar_optimized::<F>();
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut r0_buf = [0u8; 32];
+            r0.serialize_compressed(&mut r0_buf[..]).ok();
+            eprintln!("[JOLT UNISKIP VERIFY] r0 (LE) = {:02x?}", r0_buf);
+        }
+
         // Check symmetric-domain sum equals zero (initial claim), and compute next claim s1(r0)
         let input_claim = sumcheck_instance.input_claim(opening_accumulator);
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut claim_buf = [0u8; 32];
+            input_claim.serialize_compressed(&mut claim_buf[..]).ok();
+            eprintln!("[JOLT UNISKIP VERIFY] input_claim (LE) = {:02x?}", claim_buf);
+        }
         let ok = proof
             .uni_poly
             .check_sum_evals::<N, FIRST_ROUND_POLY_NUM_COEFFS>(input_claim);
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("[JOLT UNISKIP VERIFY] check_sum_evals ok = {}", ok);
+        }
         sumcheck_instance.cache_openings(opening_accumulator, transcript, &[r0]);
 
         if !ok {
