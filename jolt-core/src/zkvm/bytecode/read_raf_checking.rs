@@ -286,15 +286,21 @@ impl ZoltBytecodeFlags {
     }
 
     /// Create flags for a NoOp/padding bytecode entry.
-    /// In Zolt's buildBytecodeEntries, all entries are initialized with ALL flags false,
-    /// is_interleaved=false, address=0, rd=rs1=rs2=0, imm=0, lookup_table_index=255.
-    /// NoOp steps in the execution trace are skipped (line 91), so padding entries
-    /// remain as this zero-initialized state.
+    /// Matches Jolt's Instruction::NoOp flags:
+    ///   circuit_flags[DoNotUpdateUnexpandedPC] = true
+    ///   instruction_flags[IsNoop] = true
+    /// All other fields are zero. This is critical for BytecodeReadRaf correctness:
+    /// NoOp cycles in the R1CS witness have FlagDoNotUpdateUnexpandedPC=1 and
+    /// FlagIsNoop=1, so the bytecode entry must have matching flags.
     pub fn noop() -> Self {
-        use crate::zkvm::instruction::NUM_INSTRUCTION_FLAGS;
+        use crate::zkvm::instruction::{CircuitFlags, InstructionFlags, NUM_INSTRUCTION_FLAGS};
+        let mut circuit_flags = [false; NUM_CIRCUIT_FLAGS];
+        circuit_flags[CircuitFlags::DoNotUpdateUnexpandedPC as usize] = true;
+        let mut instruction_flags = [false; NUM_INSTRUCTION_FLAGS];
+        instruction_flags[InstructionFlags::IsNoop as usize] = true;
         ZoltBytecodeFlags {
-            circuit_flags: [false; NUM_CIRCUIT_FLAGS],
-            instruction_flags: [false; NUM_INSTRUCTION_FLAGS],
+            circuit_flags,
+            instruction_flags,
             lookup_table_index: None,
             is_interleaved: false,
             rd: Some(0),
@@ -401,15 +407,64 @@ impl ZoltBytecodeFlags {
         }
     }
 
+    /// Create a termination instruction entry for non-anchor virtual instructions
+    /// (LUI vsr=2, ADDI vsr=1). Sets VirtualInstruction=true and DoNotUpdateUnexpandedPC=true.
+    /// Address is always 0 (unexpanded_pc=0).
+    fn termination_entry_virtual(word: u32) -> Self {
+        use crate::zkvm::instruction::{CircuitFlags as CF};
+        let mut entry = Self::from_raw_word(word, 0);
+        entry.circuit_flags[CF::VirtualInstruction as usize] = true;
+        entry.circuit_flags[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        entry
+    }
+
+    /// Create a termination instruction entry for the anchor instruction (SB vsr=0).
+    /// Only sets DoNotUpdateUnexpandedPC=true, NOT VirtualInstruction.
+    /// VirtualInstruction cannot be set for the anchor because:
+    ///   R1CS constraint 17: if VirtualInstruction then NextPC == PC + 1
+    ///   SB is the last real cycle before NoOp padding, so NextPC=0 ≠ PC+1.
+    fn termination_entry_anchor(word: u32) -> Self {
+        use crate::zkvm::instruction::{CircuitFlags as CF};
+        let mut entry = Self::from_raw_word(word, 0);
+        entry.circuit_flags[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        entry
+    }
+
     /// Build Zolt-compatible flags from raw ELF bytes.
     /// `raw_words` must be the same length as `bytecode`.
-    /// `termination_address` is used to create the k=0 entry (termination SB store).
+    /// `termination_address` is used to construct the 3 termination instruction words.
+    /// Each termination instruction (LUI, ADDI, SB) gets its own bytecode entry at
+    /// indices termination_base_pc, +1, +2 (matching Jolt's approach where each virtual
+    /// instruction in a sequence has its own bytecode entry).
     pub fn from_raw_words(raw_words: &[u32], bytecode: &[Instruction], termination_address: u64) -> Vec<Self> {
         assert_eq!(raw_words.len(), bytecode.len());
-        let result: Vec<Self> = raw_words.iter().zip(bytecode.iter()).enumerate().map(|(k, (word, instr))| {
-            if k == 0 {
-                Self::termination_store_k0(termination_address)
-            } else if matches!(instr, Instruction::NoOp) {
+
+        // Get termination_base_pc from global (set by preprocessing loader)
+        let termination_base_pc = super::ZOLT_TERMINATION_BASE_PC.get().copied();
+
+        // Construct the 3 termination instruction words from the termination address
+        let upper20 = ((termination_address >> 12) & 0xFFFFF) as u32;
+        let lower12 = (termination_address & 0xFFF) as u32;
+        let imm_upper7 = (lower12 >> 5) & 0x7F;
+        let imm_lower5 = lower12 & 0x1F;
+        let lui_word: u32 = (upper20 << 12) | (31 << 7) | 0x37;
+        let addi_word: u32 = (1 << 20) | (0 << 15) | (0 << 12) | (30 << 7) | 0x13;
+        let sb_word: u32 = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
+
+        let mut result: Vec<Self> = raw_words.iter().zip(bytecode.iter()).enumerate().map(|(k, (word, instr))| {
+            // Check if this is a termination entry
+            if let Some(tbpc) = termination_base_pc {
+                if k == tbpc {
+                    return Self::termination_entry_virtual(lui_word);
+                } else if k == tbpc + 1 {
+                    return Self::termination_entry_virtual(addi_word);
+                } else if k == tbpc + 2 {
+                    return Self::termination_entry_anchor(sb_word);
+                }
+            }
+
+            // k=0 is now just a NoOp entry (no more accumulated termination flags)
+            if k == 0 || matches!(instr, Instruction::NoOp) {
                 Self::noop()
             } else {
                 let norm = instr.normalize();
@@ -417,10 +472,25 @@ impl ZoltBytecodeFlags {
             }
         }).collect();
 
+        // If no termination_base_pc was set, the entries beyond raw_words.len() won't
+        // exist yet. They may need to be placed at indices that are within the padded
+        // array. Check and fix if needed.
+        if let Some(tbpc) = termination_base_pc {
+            // Ensure the array is large enough
+            while result.len() <= tbpc + 2 {
+                result.push(Self::noop());
+            }
+            // Overwrite in case they weren't set in the map above
+            result[tbpc] = Self::termination_entry_virtual(lui_word);
+            result[tbpc + 1] = Self::termination_entry_virtual(addi_word);
+            result[tbpc + 2] = Self::termination_entry_anchor(sb_word);
+        }
+
         // Debug: dump entries in same format as Zolt
         use crate::zkvm::instruction::NUM_INSTRUCTION_FLAGS;
-        eprintln!("\n[JOLT BYTECODE ENTRIES] count={}", result.len());
-        for (k, e) in result.iter().enumerate().take(28) {
+        eprintln!("\n[JOLT BYTECODE ENTRIES] count={} termination_base_pc={:?}", result.len(), termination_base_pc);
+        let dump_count = std::cmp::min(result.len(), if let Some(tbpc) = termination_base_pc { tbpc + 5 } else { 28 });
+        for (k, e) in result.iter().enumerate().take(dump_count) {
             let mut cf_bits: u16 = 0;
             for i in 0..NUM_CIRCUIT_FLAGS {
                 if e.circuit_flags[i] { cf_bits |= 1u16 << i; }
@@ -1019,6 +1089,24 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let (r_address_prime, r_cycle_prime) = opening_point.split_at(self.params.log_K);
         // r_cycle is bound LowToHigh, so reverse
 
+        // Debug: print r_address_prime and r_cycle_prime
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[BCRAF_VERIFY] r_address_prime (len={}):", r_address_prime.r.len());
+            for (i, v) in r_address_prime.r.iter().enumerate() {
+                let mut b = [0u8; 32]; v.serialize_compressed(&mut b[..]).ok();
+                let h: String = b.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  r_addr[{}]_LE=[{}]", i, h);
+            }
+            eprintln!("[BCRAF_VERIFY] r_cycle_prime (len={}):", r_cycle_prime.r.len());
+            for (i, v) in r_cycle_prime.r.iter().enumerate() {
+                let mut b = [0u8; 32]; v.serialize_compressed(&mut b[..]).ok();
+                let h: String = b.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  r_cyc[{}]_LE=[{}]", i, h);
+            }
+        }
+
         let int_poly = self.params.int_poly.evaluate(&r_address_prime.r);
 
         let ra_claims = (0..self.params.d).map(|i| {
@@ -1040,27 +1128,52 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         // Stage 5: gamma^4 * (Val_5)
         // Which matches with the input claim:
         // rv_1 + gamma * rv_2 + gamma^2 * rv_3 + gamma^3 * rv_4 + gamma^4 * rv_5 + gamma^5 * raf_1 + gamma^6 * raf_3
+        let raf_terms = [
+            int_poly * self.params.gamma_powers[5], // RAF for Stage1
+            F::zero(),                              // There's no raf for Stage2
+            int_poly * self.params.gamma_powers[4], // RAF for Stage3
+            F::zero(),                              // There's no raf for Stage4
+            F::zero(),                              // There's no raf for Stage5
+        ];
+
         let val = self
             .params
             .val_polys
             .iter()
             .zip(&self.params.r_cycles)
             .zip(&self.params.gamma_powers)
-            .zip([
-                int_poly * self.params.gamma_powers[5], // RAF for Stage1
-                F::zero(),                              // There's no raf for Stage2
-                int_poly * self.params.gamma_powers[4], // RAF for Stage3
-                F::zero(),                              // There's no raf for Stage4
-                F::zero(),                              // There's no raf for Stage5
-            ])
-            .map(|(((val, r_cycle), gamma), int_poly)| {
-                (val.evaluate(&r_address_prime.r) + int_poly)
-                    * EqPolynomial::<F>::mle(r_cycle, &r_cycle_prime.r)
-                    * gamma
+            .zip(raf_terms)
+            .enumerate()
+            .map(|(s, (((val, r_cycle), gamma), raf))| {
+                let val_eval = val.evaluate(&r_address_prime.r);
+                let eq_eval = EqPolynomial::<F>::mle(r_cycle, &r_cycle_prime.r);
+                let stage_contrib = (val_eval + raf) * eq_eval * gamma;
+                let bound_val = (val_eval + raf) * gamma;
+                {
+                    use ark_serialize::CanonicalSerialize;
+                    let mut vb = [0u8; 32]; val_eval.serialize_compressed(&mut vb[..]).ok();
+                    let mut eb = [0u8; 32]; eq_eval.serialize_compressed(&mut eb[..]).ok();
+                    let mut bb = [0u8; 32]; bound_val.serialize_compressed(&mut bb[..]).ok();
+                    let vh: String = vb.iter().map(|b| format!("{:02x}", b)).collect();
+                    let eh: String = eb.iter().map(|b| format!("{:02x}", b)).collect();
+                    let bh: String = bb.iter().map(|b| format!("{:02x}", b)).collect();
+                    eprintln!("[BCRAF_VERIFY] stage[{}]: val_eval_LE=[{}] eq_LE=[{}] bound_val_LE=[{}]",
+                        s, vh, eh, bh);
+                }
+                stage_contrib
             })
             .sum::<F>();
 
-        ra_claims.fold(val, |running, ra_claim| running * ra_claim)
+        eprintln!("[BCRAF_VERIFY] val (sum) = {:?}", val);
+
+        let result = ra_claims.enumerate().fold(val, |running, (i, ra_claim)| {
+            eprintln!("[BCRAF_VERIFY] ra[{}] = {:?}", i, ra_claim);
+            running * ra_claim
+        });
+
+        eprintln!("[BCRAF_VERIFY] expected_output = {:?}", result);
+
+        result
     }
 
     fn cache_openings(
@@ -1125,7 +1238,17 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
         opening_accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
     ) -> Self {
-        let gamma_powers = transcript.challenge_scalar_powers(7);
+        let gamma_powers: Vec<F> = transcript.challenge_scalar_powers(7);
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut g_bytes = vec![];
+            gamma_powers[1].serialize_compressed(&mut g_bytes).unwrap();
+            eprint!("[JOLT STAGE6] bytecodeRaf_gamma = [");
+            for i in 0..8 { eprint!("{:02x},", g_bytes[i]); }
+            eprintln!("]");
+        }
 
         let bytecode = &bytecode_preprocessing.bytecode;
 
@@ -1164,6 +1287,45 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
             .r;
         let eq_r_register_5 =
             EqPolynomial::<F>::evals(&r_register_5[..(REGISTER_COUNT as usize).log_2()]);
+
+        // Debug: print r_register values and eq table entries
+        #[cfg(feature = "zolt-debug")]
+        {
+            eprintln!("[JOLT STAGE6] r_register_4 (len={}):", r_register_4.len());
+            for (i, rv) in r_register_4.iter().enumerate() {
+                use ark_serialize::CanonicalSerialize;
+                let mut bytes = [0u8; 32];
+                rv.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_register_4[{}] = {:02x?}", i, &bytes);
+            }
+            eprintln!("[JOLT STAGE6] r_register_5 (len={}):", r_register_5.len());
+            for (i, rv) in r_register_5.iter().enumerate() {
+                use ark_serialize::CanonicalSerialize;
+                let mut bytes = [0u8; 32];
+                rv.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("  r_register_5[{}] = {:02x?}", i, &bytes);
+            }
+            // Print eq_table_4 entries at specific indices in LE hex
+            eprintln!("[JOLT STAGE6] eq_r_register_4 (len={}):", eq_r_register_4.len());
+            for idx in [0usize, 1, 2, 8, 10, 15, 31, 127] {
+                if idx < eq_r_register_4.len() {
+                    use ark_serialize::CanonicalSerialize;
+                    let mut bytes = [0u8; 32];
+                    eq_r_register_4[idx].serialize_compressed(&mut bytes[..]).ok();
+                    let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                    eprintln!("  eq4[{}]_LE=[{}]", idx, hex_str);
+                }
+            }
+            // Print stage4_gammas in LE hex
+            eprintln!("[JOLT STAGE6] stage4_gammas:");
+            for i in 0..3 {
+                use ark_serialize::CanonicalSerialize;
+                let mut bytes = [0u8; 32];
+                stage4_gammas[i].serialize_compressed(&mut bytes[..]).ok();
+                let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  gamma4[{}]_LE=[{}]", i, hex_str);
+            }
+        }
 
         // Fused pass: compute all val polynomials in a single parallel iteration
         #[cfg(feature = "zolt-debug")]
@@ -1574,6 +1736,17 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
                     *o4 = lc;
                 }
             });
+
+        // Debug: print first 4 vals for each stage in hex LE format
+        for s in 0..5 {
+            for k in 0..std::cmp::min(K, 4) {
+                use ark_serialize::CanonicalSerialize;
+                let mut bytes = [0u8; 32];
+                vals[s][k].serialize_compressed(&mut bytes[..]).ok();
+                let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("[JOLT_VAL_POLY] Val[{}][{}]_LE=[{}]", s, k, hex_str);
+            }
+        }
 
         vals.map(MultilinearPolynomial::from)
     }

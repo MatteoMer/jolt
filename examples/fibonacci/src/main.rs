@@ -204,6 +204,7 @@ fn verify_zolt_proof(proof_path: &str, zolt_preprocessing_path: Option<&str>) {
                 // Decode RISC-V instructions from raw ELF bytes
                 use tracer::instruction::Instruction as TracerInstruction;
                 let mut instructions = vec![TracerInstruction::NoOp]; // Prepend NoOp at index 0
+                let mut raw_words: Vec<u32> = vec![0]; // NoOp has no raw word
                 let mut offset: usize = 0;
                 while offset < raw_bytes.len() {
                     let addr = elf_base_address + offset as u64;
@@ -215,8 +216,14 @@ fn verify_zolt_proof(proof_path: &str, zolt_preprocessing_path: Option<&str>) {
                         // For now, decode as a 32-bit instruction with only lower 16 bits
                         let word32 = lo16 as u32;
                         match TracerInstruction::decode(word32, addr, true) {
-                            Ok(instr) => instructions.push(instr),
-                            Err(_) => instructions.push(TracerInstruction::NoOp),
+                            Ok(instr) => {
+                                instructions.push(instr);
+                                raw_words.push(word32);
+                            }
+                            Err(_) => {
+                                instructions.push(TracerInstruction::NoOp);
+                                raw_words.push(0);
+                            }
                         }
                         offset += 2;
                     } else {
@@ -226,17 +233,21 @@ fn verify_zolt_proof(proof_path: &str, zolt_preprocessing_path: Option<&str>) {
                             raw_bytes[offset + 2], raw_bytes[offset + 3],
                         ]);
                         match TracerInstruction::decode(word32, addr, false) {
-                            Ok(instr) => instructions.push(instr),
+                            Ok(instr) => {
+                                instructions.push(instr);
+                                raw_words.push(word32);
+                            }
                             Err(e) => {
                                 println!("  WARNING: Failed to decode instruction at 0x{:x}: {} (word=0x{:08x})", addr, e, word32);
                                 instructions.push(TracerInstruction::NoOp);
+                                raw_words.push(0);
                             }
                         }
                         offset += 4;
                     }
                 }
                 println!("  Decoded {} instructions from ELF", instructions.len() - 1);
-                Some(instructions)
+                Some((instructions, raw_words))
             } else {
                 println!("  WARNING: Not enough bytes for ELF program data");
                 None
@@ -244,6 +255,22 @@ fn verify_zolt_proof(proof_path: &str, zolt_preprocessing_path: Option<&str>) {
         } else {
             println!("  No ELF program data in preprocessing (old format)");
             None
+        };
+
+        // Read termination_base_pc (u64) - bytecode index where LUI/ADDI/SB entries start
+        let zolt_termination_base_pc = if cursor.position() < pp_bytes.len() as u64 {
+            let tbpc = read_u64(&mut cursor) as usize;
+            println!("  Zolt termination_base_pc: {}", tbpc);
+            Some(tbpc)
+        } else {
+            println!("  No termination_base_pc in preprocessing (old format)");
+            None
+        };
+
+        // Split zolt_bytecode into instructions and raw words
+        let (zolt_instructions, zolt_raw_words) = match zolt_bytecode {
+            Some((instrs, words)) => (Some(instrs), Some(words)),
+            None => (None, None),
         };
 
         // Override bytecode preprocessing code_size and instruction array to match Zolt's program
@@ -254,15 +281,33 @@ fn verify_zolt_proof(proof_path: &str, zolt_preprocessing_path: Option<&str>) {
             bytecode_mut.code_size = cs;
 
             // If we have Zolt's decoded bytecode, use it instead of Jolt's
-            if let Some(zolt_bc) = zolt_bytecode {
+            if let Some(ref zolt_bc) = zolt_instructions {
                 println!("  Replacing Jolt bytecode with decoded Zolt ELF bytecode ({} instrs)", zolt_bc.len());
-                bytecode_mut.bytecode = zolt_bc;
+                bytecode_mut.bytecode = zolt_bc.clone();
                 // Rebuild PC map BEFORE padding (matching BytecodePreprocessing::preprocess behavior)
                 bytecode_mut.pc_map = jolt_core::zkvm::bytecode::BytecodePCMapper::new(&bytecode_mut.bytecode);
             }
 
             // Resize/pad to match code_size (AFTER pc_map construction)
             bytecode_mut.bytecode.resize(cs, TracerInstruction::NoOp);
+
+            // Store raw words in global static for Zolt Val polynomial computation
+            if let Some(ref words) = zolt_raw_words {
+                let mut padded_words = words.clone();
+                padded_words.resize(cs, 0);
+                let _ = jolt_core::zkvm::bytecode::ZOLT_RAW_WORDS.set(padded_words);
+                println!("  Stored {} raw instruction words for Zolt flag computation", words.len());
+            }
+
+            // Store termination address for bytecode entry reconstruction
+            let _ = jolt_core::zkvm::bytecode::ZOLT_TERMINATION_ADDRESS.set(termination_address);
+            println!("  Stored termination_address=0x{:x} for termination bytecode entries", termination_address);
+
+            // Store termination_base_pc for separate LUI/ADDI/SB entries
+            if let Some(tbpc) = zolt_termination_base_pc {
+                let _ = jolt_core::zkvm::bytecode::ZOLT_TERMINATION_BASE_PC.set(tbpc);
+                println!("  Stored termination_base_pc={} for separate termination entries", tbpc);
+            }
         }
 
         println!("  Overrode shared_preprocessing.ram, memory_layout, and bytecode with Zolt values");

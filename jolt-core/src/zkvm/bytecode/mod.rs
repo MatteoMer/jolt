@@ -4,6 +4,22 @@ use tracer::instruction::{Cycle, Instruction};
 
 pub mod read_raf_checking;
 
+/// Thread-safe storage for Zolt raw instruction words.
+/// Set this before verification to enable Zolt-compatible Val polynomial computation.
+#[cfg(feature = "zolt-debug")]
+pub static ZOLT_RAW_WORDS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+
+/// Thread-safe storage for the termination address from the memory layout.
+/// Needed to reconstruct the termination LUI/ADDI/SB instructions.
+#[cfg(feature = "zolt-debug")]
+pub static ZOLT_TERMINATION_ADDRESS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Thread-safe storage for the termination_base_pc from BytecodePCMapper.
+/// This is the bytecode index where the 3 termination entries start:
+///   LUI → termination_base_pc, ADDI → +1, SB → +2
+#[cfg(feature = "zolt-debug")]
+pub static ZOLT_TERMINATION_BASE_PC: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
 #[derive(Default, Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BytecodePreprocessing {
     pub code_size: usize,
