@@ -1012,6 +1012,19 @@ impl ZoltBytecodeFlags {
                 );
             }
 
+            // Check if this is a VirtualSRLI instruction
+            // (produced by inline_sequence for SRLI and SRLIW)
+            if let Instruction::VirtualSRLI(vsrli) = instr {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_srli_entry(
+                    rd_raw, rs1_raw, vsrli.operands.imm as u64, norm.address,
+                    vsr, is_first, norm.is_compressed,
+                );
+            }
+
             // Check if this is a VirtualAdvice instruction
             // (produced by inline_sequence for REMUW, DIVW, REMW, etc.)
             if matches!(instr, Instruction::VirtualAdvice(_)) {
@@ -1180,7 +1193,7 @@ impl ZoltBytecodeFlags {
         // Debug: dump entries in same format as Zolt
         use crate::zkvm::instruction::NUM_INSTRUCTION_FLAGS;
         eprintln!("\n[JOLT BYTECODE ENTRIES] count={} termination_base_pc={:?}", result.len(), termination_base_pc);
-        let dump_count = std::cmp::min(result.len(), if let Some(tbpc) = termination_base_pc { tbpc + 5 } else { 28 });
+        let dump_count = result.len(); // dump ALL entries
         for (k, e) in result.iter().enumerate().take(dump_count) {
             let mut cf_bits: u16 = 0;
             for i in 0..NUM_CIRCUIT_FLAGS {
@@ -1828,6 +1841,25 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             }
         }
 
+        // Print the sumcheck challenges used for address (LH order)
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[BCRAF_VERIFY] sumcheck_challenges[..log_K] (len={}, LH order):", self.params.log_K);
+            for (i, c) in sumcheck_challenges[..self.params.log_K].iter().enumerate() {
+                let c_f: F = (*c).into();
+                let mut cb = [0u8; 32];
+                c_f.serialize_compressed(&mut cb[..]).ok();
+                let ch: String = cb.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  ch[{}]_LE=[{}]", i, ch);
+            }
+            eprintln!("[BCRAF_VERIFY] r_address_prime.r (len={}, after normalize/reverse):", r_address_prime.r.len());
+            for (i, r) in r_address_prime.r.iter().enumerate() {
+                let mut rb = [0u8; 32];
+                r.serialize_compressed(&mut rb[..]).ok();
+                let rh: String = rb.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  r_addr[{}]_LE=[{}]", i, rh);
+            }
+        }
         let int_poly = self.params.int_poly.evaluate(&r_address_prime.r);
 
         // ALWAYS-ON: print int_poly evaluation and RAF terms
@@ -1883,6 +1915,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             .zip(raf_terms)
             .enumerate()
             .map(|(s, (((val, r_cycle), gamma), raf))| {
+                // Print first few val_poly coefficients for comparison with Zolt prover
+                {
+                    use ark_serialize::CanonicalSerialize;
+                    let n_entries = val.len().min(32);
+                    for k in 0..n_entries {
+                        let coeff = val.get_coeff(k);
+                        let mut cb = [0u8; 32];
+                        coeff.serialize_compressed(&mut cb[..]).ok();
+                        eprintln!("[JOLT_VP] Val[{}][{}]_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                            s, k, cb[0], cb[1], cb[2], cb[3], cb[4], cb[5], cb[6], cb[7]);
+                    }
+                }
                 let val_eval = val.evaluate(&r_address_prime.r);
                 // Cross-check: compute val_eval manually using LE eq (Zolt's convention)
                 let lh_val_eval = {
@@ -1914,7 +1958,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                     for k in 0..val.len() {
                         let prod = val.get_coeff(k) * eq[k];
                         sum += prod;
-                        if s == 0 && (k < 3 || k == val.len() - 1) {
+                        if s == 0 {
                             use ark_serialize::CanonicalSerialize;
                             let mut pb = [0u8; 32]; prod.serialize_compressed(&mut pb[..]).ok();
                             let mut sb = [0u8; 32]; sum.serialize_compressed(&mut sb[..]).ok();
@@ -1946,13 +1990,31 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             })
             .sum::<F>();
 
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut vb = [0u8; 32];
+            val.serialize_compressed(&mut vb[..]).ok();
+            let vh: String = vb.iter().map(|b| format!("{:02x}", b)).collect();
+            eprintln!("[BCRAF_VERIFY] val_sum_LE=[{}]", vh);
+        }
         eprintln!("[BCRAF_VERIFY] val (sum) = {:?}", val);
 
         let result = ra_claims.enumerate().fold(val, |running, (i, ra_claim)| {
-            eprintln!("[BCRAF_VERIFY] ra[{}] = {:?}", i, ra_claim);
+            use ark_serialize::CanonicalSerialize;
+            let mut rab = [0u8; 32];
+            ra_claim.serialize_compressed(&mut rab[..]).ok();
+            let rah: String = rab.iter().map(|b| format!("{:02x}", b)).collect();
+            eprintln!("[BCRAF_VERIFY] ra[{}]_LE=[{}]", i, rah);
             running * ra_claim
         });
 
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut rb = [0u8; 32];
+            result.serialize_compressed(&mut rb[..]).ok();
+            let rh: String = rb.iter().map(|b| format!("{:02x}", b)).collect();
+            eprintln!("[BCRAF_VERIFY] expected_output_LE=[{}]", rh);
+        }
         eprintln!("[BCRAF_VERIFY] expected_output = {:?}", result);
 
         result
