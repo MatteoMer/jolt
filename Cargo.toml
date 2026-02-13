@@ -60,6 +60,8 @@ members = [
     "examples/stdlib/guest",
     "examples/muldiv",
     "examples/muldiv/guest",
+    "examples/bitwise",
+    "examples/bitwise/guest",
     "examples/overflow",
     "examples/overflow/guest",
     "examples/memory-ops",

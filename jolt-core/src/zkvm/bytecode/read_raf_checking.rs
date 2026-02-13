@@ -76,10 +76,44 @@ pub struct ZoltBytecodeFlags {
     pub imm: i128,
     /// ELF address
     pub address: usize,
+    /// RISC-V opcode (bits[6:0]) - needed for per-opcode immediate field encoding
+    pub opcode: u8,
+    /// RISC-V funct3 (bits[14:12]) - needed for per-opcode immediate field encoding
+    pub funct3: u8,
 }
 
 #[cfg(feature = "zolt-debug")]
 impl ZoltBytecodeFlags {
+    /// Encode the immediate value into a field element using the same per-opcode
+    /// encoding as Zolt's stage6_prover.zig. This is critical for val polynomial
+    /// consistency between prover and verifier.
+    ///
+    /// Three categories:
+    ///   1. ADDI(funct3=0)/ADDIW(funct3=0)/JAL/JALR → unsigned u64 bitcast of sign-extended i64
+    ///   2. LUI/AUIPC → truncated u32 (recovers raw instr & 0xFFFFF000)
+    ///   3. Everything else → signed field value (from_i128)
+    fn encode_imm_field<F: JoltField>(flags: &ZoltBytecodeFlags) -> F {
+        let is_identity_add = match flags.opcode {
+            0x13 => flags.funct3 == 0, // ADDI
+            0x1b => flags.funct3 == 0, // ADDIW
+            0x6f => true,              // JAL
+            0x67 => true,              // JALR
+            _ => false,
+        };
+        if is_identity_add {
+            // Unsigned u64 bitcast of sign-extended i64 immediate
+            return F::from_u64(flags.imm as i64 as u64);
+        }
+        let is_u_type = flags.opcode == 0x37 || flags.opcode == 0x17;
+        if is_u_type {
+            // LUI/AUIPC: recover the raw u32 value (instr & 0xFFFFF000)
+            // flags.imm is sign-extended i32 → truncate the u64 bitcast to u32
+            return F::from_u64((flags.imm as i64 as u64 as u32) as u64);
+        }
+        // Everything else: signed field encoding
+        F::from_i128(flags.imm)
+    }
+
     /// Compute Zolt-compatible flags from a raw 32-bit instruction word.
     /// This replicates Zolt's buildBytecodeEntries logic from stage6_prover.zig,
     /// computing flags, register indices, and lookup table from the raw instruction bits.
@@ -159,11 +193,16 @@ impl ZoltBytecodeFlags {
         if opcode == 0x6F || opcode == 0x67 { cf[CF::Jump as usize] = true; }
 
         // WriteLookupOutputToRD
-        if has_lookup && opcode != 0x63 {
+        // JAL (0x6F) and JALR (0x67) do NOT set this flag - they write PC+4 to rd
+        // via the WritePCtoRD mechanism, not the lookup output.
+        // BRANCH (0x63) also doesn't set this flag.
+        if has_lookup && opcode != 0x63 && opcode != 0x6f && opcode != 0x67 {
             cf[CF::WriteLookupOutputToRD as usize] = true;
         }
 
         // AddOperands, SubtractOperands, MultiplyOperands
+        // Must match Zolt's populateEntryFromInstruction exactly.
+        // LUI, AUIPC, JAL all set AddOperands=true for identity-path lookups.
         if has_lookup {
             match opcode {
                 0x33 => { // R-type
@@ -173,7 +212,10 @@ impl ZoltBytecodeFlags {
                     if funct7 == 0x01 && funct3 == 3 { cf[CF::MultiplyOperands as usize] = true; }
                 },
                 0x13 => { if funct3 == 0 { cf[CF::AddOperands as usize] = true; } },
-                0x67 => { cf[CF::AddOperands as usize] = true; },
+                0x67 => { cf[CF::AddOperands as usize] = true; }, // JALR
+                0x37 => { cf[CF::AddOperands as usize] = true; }, // LUI
+                0x17 => { cf[CF::AddOperands as usize] = true; }, // AUIPC
+                0x6f => { cf[CF::AddOperands as usize] = true; }, // JAL
                 0x1b => { if funct3 == 0 { cf[CF::AddOperands as usize] = true; } },
                 0x3b => {
                     if funct3 == 0 && funct7 == 0 { cf[CF::AddOperands as usize] = true; }
@@ -267,10 +309,26 @@ impl ZoltBytecodeFlags {
             _ => 0,
         };
 
-        // Determine rd, rs1, rs2 (always from raw instruction bits, matching Zolt)
-        let rd = Some(rd_raw);
-        let rs1 = Some(rs1_raw);
-        let rs2 = Some(rs2_raw);
+        // Determine rd, rs1, rs2 matching Zolt's register matrix behavior:
+        // - rd:  None for S-format (0x23), B-format (0x63), and rd==0 (x0 never written)
+        //   Zolt's register write matrix has `rd != 0 and rd < 32` check, so rd=0 writes
+        //   are excluded. The val poly must match by setting rd=None for rd_raw==0.
+        // - rs1: None for U-type (LUI 0x37, AUIPC 0x17) and J-type (JAL 0x6f)
+        // - rs2: None for I-type (0x13, 0x03, 0x67, 0x1b), U-type (0x37, 0x17), J-type (0x6f)
+        // When None, the val poly contribution is zero.
+        let rd = match opcode {
+            0x23 | 0x63 => None,
+            _ if rd_raw == 0 => None,
+            _ => Some(rd_raw),
+        };
+        let rs1 = match opcode {
+            0x37 | 0x17 | 0x6f => None,
+            _ => Some(rs1_raw),
+        };
+        let rs2 = match opcode {
+            0x13 | 0x03 | 0x67 | 0x1b | 0x37 | 0x17 | 0x6f => None,
+            _ => Some(rs2_raw),
+        };
 
         ZoltBytecodeFlags {
             circuit_flags: cf,
@@ -282,6 +340,8 @@ impl ZoltBytecodeFlags {
             rs2,
             imm,
             address,
+            opcode,
+            funct3,
         }
     }
 
@@ -302,12 +362,22 @@ impl ZoltBytecodeFlags {
             circuit_flags,
             instruction_flags,
             lookup_table_index: None,
-            is_interleaved: false,
-            rd: Some(0),
-            rs1: Some(0),
-            rs2: Some(0),
+            // NoOp has no AddOperands/SubtractOperands/MultiplyOperands/Advice flags,
+            // so is_interleaved_operands() = true. This means !is_interleaved = false,
+            // so noops do NOT contribute to the identity-path (InstructionRafFlag) sum.
+            // This matches Stage 5's trace-based computation where NoOp cycles → not identity path.
+            is_interleaved: true,
+            // Use None for rd/rs1/rs2 so that noop entries contribute ZERO
+            // to Stages 4 and 5 val polynomials (matching Jolt's original behavior
+            // where Instruction::NoOp has operands.rd = None → zero contribution).
+            // The Zolt bytecode entry uses rd=255 sentinel for the same effect.
+            rd: None,
+            rs1: None,
+            rs2: None,
             imm: 0,
             address: 0,
+            opcode: 0,
+            funct3: 0,
         }
     }
 
@@ -404,6 +474,8 @@ impl ZoltBytecodeFlags {
             rs2: Some(rs2_raw),
             imm,
             address: 0,
+            opcode: 0x23, // SB (last instruction wins for scalar fields)
+            funct3: 0,
         }
     }
 
@@ -430,12 +502,450 @@ impl ZoltBytecodeFlags {
         entry
     }
 
+    /// Create flags for a VirtualSignExtendWord instruction entry.
+    /// VirtualSignExtendWord is always the last entry in a W-extension decomposition.
+    /// It sign-extends the lower 32 bits of rd to 64 bits.
+    /// Circuit flags: AddOperands, WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: SignExtendHalfWord (index 21)
+    /// imm = 0, rs1 = rd (reads its own output), rs2 = None
+    fn virtual_sign_extend_word_entry(rd: u8, rs1: u8, address: usize, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::AddOperands as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        // VirtualSignExtendWord is always the last in the sequence (vsr=0),
+        // so DoNotUpdateUnexpandedPC = false
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+        // IsFirstInSequence = false (always 2nd+ entry)
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        // VirtualSignExtendWord does NOT set RightOperandIsImm
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(21), // SignExtendHalfWord
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1), // VirtualSignExtendWord reads from rs1 (may differ from rd in long sequences like REMUW)
+            rs2: None,     // I-type: no rs2
+            imm: 0,
+            address,
+            opcode: 0x0B,  // Virtual custom-0 opcode
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a VirtualMULI instruction entry.
+    /// VirtualMULI is used as the base instruction for SLLIW decomposition.
+    /// Circuit flags: MultiplyOperands, WriteLookupOutputToRD, VirtualInstruction,
+    ///   DoNotUpdateUnexpandedPC (if vsr > 0), IsFirstInSequence (if first)
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsImm, IsRdNotZero (if rd != 0)
+    /// Lookup table: RangeCheck (index 0)
+    fn virtual_muli_entry(rd: u8, rs1: u8, imm: i128, address: usize,
+                          vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::MultiplyOperands as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsImm as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(0), // RangeCheck
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: None,
+            imm,
+            address,
+            opcode: 0x2B,  // Virtual custom-1 opcode
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a VirtualSRLI (virtual shift-right-logical) instruction entry.
+    /// Circuit flags: WriteLookupOutputToRD, VirtualInstruction, (DoNotUpdateUnexpandedPC if vsr != 0)
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsImm, IsRdNotZero (if rd != 0)
+    /// Lookup table: VirtualSRL (index 26)
+    /// Uses interleaved operands (NOT identity path).
+    fn virtual_srli_entry(rd: u8, rs1: u8, bitmask: u64, address: usize,
+                          vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsImm as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        // VirtualSRLI uses interleaved operands (no AddOperands/SubtractOperands/MultiplyOperands)
+        let is_interleaved = true;
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(26), // VirtualSRL
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: None,
+            imm: bitmask as i128,
+            address,
+            opcode: 0x5B,  // Virtual custom-3 opcode for SRLI
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a VirtualAdvice instruction entry.
+    /// Circuit flags: Advice, WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: IsRdNotZero (if rd != 0)
+    /// Lookup table: RangeCheck (index 0)
+    fn virtual_advice_entry(rd: u8, address: usize,
+                            vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::Advice as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(0), // RangeCheck
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: None,
+            rs2: None,
+            imm: 0,
+            address,
+            opcode: 0x02,  // VirtualAdvice opcode
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a VirtualAssertEQ instruction entry.
+    /// Circuit flags: Assert, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+    /// Lookup table: Equal (index 6)
+    fn virtual_assert_eq_entry(rs1: u8, rs2: u8, address: usize,
+                               vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::Assert as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(6), // Equal
+            is_interleaved,
+            rd: None,  // Assert doesn't write to rd
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x22,  // VirtualAssertEQ opcode
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a VirtualZeroExtendWord instruction entry.
+    /// Circuit flags: AddOperands, WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: LowerHalfWord (index 20)
+    fn virtual_zero_extend_word_entry(rd: u8, rs1: u8, address: usize,
+                                      vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::AddOperands as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(20), // LowerHalfWord
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: None,
+            imm: 0,
+            address,
+            opcode: 0x42,  // VirtualZeroExtendWord opcode
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a VirtualAssertValidUnsignedRemainder instruction entry.
+    /// Circuit flags: Assert, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+    /// Lookup table: ValidUnsignedRemainder (index 16)
+    fn virtual_assert_valid_unsigned_remainder_entry(rs1: u8, rs2: u8, address: usize,
+                                                     vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::Assert as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(16), // ValidUnsignedRemainder
+            is_interleaved,
+            rd: None,  // Assert doesn't write to rd
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x62,  // VirtualAssertValidUnsignedRemainder opcode
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for a MUL instruction within a virtual sequence.
+    /// Circuit flags: MultiplyOperands, WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: RangeCheck (index 0)
+    fn virtual_mul_entry(rd: u8, rs1: u8, rs2: u8, address: usize,
+                         vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::MultiplyOperands as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(0), // RangeCheck
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x33,  // OP (MUL opcode space)
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for an ADD instruction within a virtual sequence.
+    /// Circuit flags: AddOperands, WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: RangeCheck (index 0)
+    fn virtual_add_entry(rd: u8, rs1: u8, rs2: u8, address: usize,
+                         vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::AddOperands as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(0), // RangeCheck
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x33,  // OP (ADD opcode space)
+            funct3: 0,
+        }
+    }
+
     /// Build Zolt-compatible flags from raw ELF bytes.
     /// `raw_words` must be the same length as `bytecode`.
     /// `termination_address` is used to construct the 3 termination instruction words.
     /// Each termination instruction (LUI, ADDI, SB) gets its own bytecode entry at
     /// indices termination_base_pc, +1, +2 (matching Jolt's approach where each virtual
     /// instruction in a sequence has its own bytecode entry).
+    ///
+    /// W-extension instructions (ADDIW, ADDW, SUBW, MULW, SLLIW) are decomposed into
+    /// virtual sequences by Jolt's inline_sequence. The bytecode array contains the
+    /// expanded instructions, and raw_words contains the parent word duplicated for
+    /// each expanded entry. This function detects virtual sequences using the
+    /// NormalizedInstruction fields and creates appropriate entries:
+    /// - Base instruction: maps opcode (0x1b→0x13, 0x3b→0x33) and sets virtual flags
+    /// - VirtualSignExtendWord: custom entry with AddOperands, lookup=SignExtendHalfWord
+    /// - VirtualMULI: custom entry with MultiplyOperands, lookup=RangeCheck
     pub fn from_raw_words(raw_words: &[u32], bytecode: &[Instruction], termination_address: u64) -> Vec<Self> {
         assert_eq!(raw_words.len(), bytecode.len());
 
@@ -451,6 +961,13 @@ impl ZoltBytecodeFlags {
         let addi_word: u32 = (1 << 20) | (0 << 15) | (0 << 12) | (30 << 7) | 0x13;
         let sb_word: u32 = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
 
+        use tracer::instruction::virtual_sign_extend_word::VirtualSignExtendWord;
+        use tracer::instruction::virtual_muli::VirtualMULI;
+        use tracer::instruction::virtual_advice::VirtualAdvice;
+        use tracer::instruction::virtual_assert_eq::VirtualAssertEQ;
+        use tracer::instruction::virtual_zero_extend_word::VirtualZeroExtendWord;
+        use tracer::instruction::virtual_assert_valid_unsigned_remainder::VirtualAssertValidUnsignedRemainder;
+
         let mut result: Vec<Self> = raw_words.iter().zip(bytecode.iter()).enumerate().map(|(k, (word, instr))| {
             // Check if this is a termination entry
             if let Some(tbpc) = termination_base_pc {
@@ -465,11 +982,185 @@ impl ZoltBytecodeFlags {
 
             // k=0 is now just a NoOp entry (no more accumulated termination flags)
             if k == 0 || matches!(instr, Instruction::NoOp) {
-                Self::noop()
-            } else {
-                let norm = instr.normalize();
-                Self::from_raw_word(*word, norm.address)
+                return Self::noop();
             }
+
+            let norm = instr.normalize();
+
+            // Check if this is a VirtualSignExtendWord instruction
+            // (produced by inline_sequence for ADDIW, ADDW, SUBW, MULW, SLLIW, REMUW, etc.)
+            // For 2-entry W-extension sequences (ADDIW etc.), rs1 == rd.
+            // For longer sequences (REMUW), rs1 may be a virtual register (e.g., a3=33).
+            if matches!(instr, Instruction::VirtualSignExtendWord(_)) {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let rs1_raw = norm.operands.rs1.unwrap_or(rd_raw);
+                return Self::virtual_sign_extend_word_entry(
+                    rd_raw, rs1_raw, norm.address, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualMULI instruction
+            // (produced by inline_sequence for SLLI and SLLIW)
+            if let Instruction::VirtualMULI(vmuli) = instr {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_muli_entry(
+                    rd_raw, rs1_raw, vmuli.operands.imm as i128, norm.address,
+                    vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualAdvice instruction
+            // (produced by inline_sequence for REMUW, DIVW, REMW, etc.)
+            if matches!(instr, Instruction::VirtualAdvice(_)) {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_advice_entry(
+                    rd_raw, norm.address, vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualAssertEQ instruction
+            if matches!(instr, Instruction::VirtualAssertEQ(_)) {
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_assert_eq_entry(
+                    rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualZeroExtendWord instruction
+            if matches!(instr, Instruction::VirtualZeroExtendWord(_)) {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_zero_extend_word_entry(
+                    rd_raw, rs1_raw, norm.address, vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualAssertValidUnsignedRemainder instruction
+            if matches!(instr, Instruction::VirtualAssertValidUnsignedRemainder(_)) {
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_assert_valid_unsigned_remainder_entry(
+                    rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a MUL instruction within a virtual sequence
+            // (produced by inline_sequence for REMUW, DIVW, etc.)
+            if matches!(instr, Instruction::MUL(_)) {
+                if let Some(vsr) = norm.virtual_sequence_remaining {
+                    let rd_raw = norm.operands.rd.unwrap_or(0);
+                    let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                    let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                    let is_first = norm.is_first_in_sequence;
+                    return Self::virtual_mul_entry(
+                        rd_raw, rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                    );
+                }
+            }
+
+            // Check if this is an ADD instruction within a virtual sequence
+            // (produced by inline_sequence for REMUW, DIVW, etc.)
+            if matches!(instr, Instruction::ADD(_)) {
+                if let Some(vsr) = norm.virtual_sequence_remaining {
+                    let rd_raw = norm.operands.rd.unwrap_or(0);
+                    let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                    let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                    let is_first = norm.is_first_in_sequence;
+                    return Self::virtual_add_entry(
+                        rd_raw, rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                    );
+                }
+            }
+
+            // For non-virtual instructions that are the first entry of a decomposed
+            // W-extension sequence (e.g., ADDIW → ADDI base, ADDW → ADD base):
+            // The bytecode has the base instruction (ADDI/ADD/SUB/MUL), but the
+            // raw word still has the W-extension opcode (0x1b/0x3b). Map the opcode
+            // and add virtual flags.
+            if let Some(vsr) = norm.virtual_sequence_remaining {
+                let raw_opcode = (*word & 0x7F) as u8;
+                let is_w_imm32 = raw_opcode == 0x1b; // OP-IMM-32 (ADDIW, etc.)
+                let is_w_op32 = raw_opcode == 0x3b;   // OP-32 (ADDW, SUBW, MULW, etc.)
+
+                // Map opcode: 0x1b → 0x13, 0x3b → 0x33
+                let mapped_word = if is_w_imm32 {
+                    (*word & !0x7F) | 0x13
+                } else if is_w_op32 {
+                    (*word & !0x7F) | 0x33
+                } else {
+                    *word
+                };
+
+                let mut entry = Self::from_raw_word(mapped_word, norm.address);
+
+                // Set virtual sequence flags
+                use crate::zkvm::instruction::CircuitFlags as CF;
+                entry.circuit_flags[CF::VirtualInstruction as usize] = true;
+                if vsr != 0 {
+                    entry.circuit_flags[CF::DoNotUpdateUnexpandedPC as usize] = true;
+                }
+                if norm.is_first_in_sequence {
+                    entry.circuit_flags[CF::IsFirstInSequence as usize] = true;
+                }
+                if norm.is_compressed {
+                    entry.circuit_flags[CF::IsCompressed as usize] = true;
+                }
+                // Recompute is_interleaved since we added flags
+                entry.is_interleaved = !entry.circuit_flags[CF::AddOperands as usize]
+                    && !entry.circuit_flags[CF::SubtractOperands as usize]
+                    && !entry.circuit_flags[CF::MultiplyOperands as usize]
+                    && !entry.circuit_flags[CF::Advice as usize];
+                return entry;
+            }
+
+            // Handle standalone shift instructions that get decomposed into virtual sequences
+            // at trace time. These are single-entry sequences in the bytecode, but the
+            // trace execution expands them into virtual instructions. The raw word is the
+            // original shift instruction, but the prover uses the EXPANDED virtual flags.
+            {
+                let raw_opcode = (*word & 0x7F) as u8;
+                let raw_funct3 = ((*word >> 12) & 0x7) as u8;
+                let rd_raw = ((*word >> 7) & 0x1F) as u8;
+                let rs1_raw = ((*word >> 15) & 0x1F) as u8;
+
+                if raw_opcode == 0x13 && raw_funct3 == 1 {
+                    // SLLI → VirtualMULI (standalone single-entry virtual sequence)
+                    let shamt = ((*word >> 20) & 0x3F) as u64;
+                    let imm_val = 1i128 << shamt;
+                    return Self::virtual_muli_entry(
+                        rd_raw, rs1_raw, imm_val, norm.address,
+                        0, true, norm.is_compressed,
+                    );
+                }
+
+                if raw_opcode == 0x13 && raw_funct3 == 5 && ((*word >> 30) & 1) == 0 {
+                    // SRLI → VirtualSRLI (standalone single-entry virtual sequence)
+                    let shamt = ((*word >> 20) & 0x3F) as u64;
+                    let ones: u128 = if shamt == 0 { u128::MAX } else {
+                        ((1u128 << (64 - shamt)) - 1) << shamt
+                    };
+                    let bitmask = ones as u64;
+                    return Self::virtual_srli_entry(
+                        rd_raw, rs1_raw, bitmask, norm.address,
+                        0, true, norm.is_compressed,
+                    );
+                }
+            }
+
+            // Non-virtual instruction: decode from raw word as before
+            Self::from_raw_word(*word, norm.address)
         }).collect();
 
         // If no termination_base_pc was set, the entries beyond raw_words.len() won't
@@ -745,6 +1436,36 @@ impl<F: JoltField> BytecodeReadRafSumcheckProver<F> {
                     computed_claim,
                     params.rv_claims[i]
                 );
+            }
+        }
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            // Print F_s values and recheck claims against rv_claims
+            for stage in 0..N_STAGES {
+                let mut computed_claim = F::zero();
+                for k in 0..std::cmp::min(params.K, 5) {
+                    let mut f_bytes = [0u8; 32];
+                    F[stage][k].serialize_compressed(&mut f_bytes[..]).ok();
+                    eprint!("[JOLT_F_S] F[{}][{}]_LE=[", stage, k);
+                    for b in &f_bytes[..8] { eprint!("{:02x}", b); }
+                    eprintln!("]");
+                }
+                for k in 0..params.K {
+                    let val_k = params.val_polys[stage].get_bound_coeff(k);
+                    let f_k = F[stage][k];
+                    computed_claim += val_k * f_k;
+                }
+                let mut claim_bytes = [0u8; 32];
+                computed_claim.serialize_compressed(&mut claim_bytes[..]).ok();
+                let mut rv_bytes = [0u8; 32];
+                params.rv_claims[stage].serialize_compressed(&mut rv_bytes[..]).ok();
+                eprint!("[JOLT_F_S] stage[{}] Σval*F_LE=[", stage);
+                for b in &claim_bytes[..8] { eprint!("{:02x}", b); }
+                eprint!("] rv_claim_LE=[");
+                for b in &rv_bytes[..8] { eprint!("{:02x}", b); }
+                eprintln!("] match={}", computed_claim == params.rv_claims[stage]);
             }
         }
 
@@ -1109,6 +1830,23 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
         let int_poly = self.params.int_poly.evaluate(&r_address_prime.r);
 
+        // ALWAYS-ON: print int_poly evaluation and RAF terms
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut ipb = [0u8; 32]; int_poly.serialize_compressed(&mut ipb[..]).ok();
+            let iph: String = ipb.iter().map(|b| format!("{:02x}", b)).collect();
+            eprintln!("[BCRAF_VERIFY] int_poly_eval_LE=[{}]", iph);
+
+            let raf0 = int_poly * self.params.gamma_powers[5];
+            let raf2 = int_poly * self.params.gamma_powers[4];
+            let mut r0b = [0u8; 32]; raf0.serialize_compressed(&mut r0b[..]).ok();
+            let mut r2b = [0u8; 32]; raf2.serialize_compressed(&mut r2b[..]).ok();
+            let r0h: String = r0b.iter().map(|b| format!("{:02x}", b)).collect();
+            let r2h: String = r2b.iter().map(|b| format!("{:02x}", b)).collect();
+            eprintln!("[BCRAF_VERIFY] gamma5*int_LE=[{}]", r0h);
+            eprintln!("[BCRAF_VERIFY] gamma4*int_LE=[{}]", r2h);
+        }
+
         let ra_claims = (0..self.params.d).map(|i| {
             accumulator
                 .get_committed_polynomial_opening(
@@ -1146,19 +1884,63 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             .enumerate()
             .map(|(s, (((val, r_cycle), gamma), raf))| {
                 let val_eval = val.evaluate(&r_address_prime.r);
+                // Cross-check: compute val_eval manually using LE eq (Zolt's convention)
+                let lh_val_eval = {
+                    let r_lh: Vec<F> = sumcheck_challenges[..self.params.log_K].iter().map(|c| (*c).into()).collect();
+                    // Use little-endian eq computation: r[0] = LSB
+                    let n = r_lh.len();
+                    let size = 1usize << n;
+                    let mut eq = vec![F::one(); size];
+                    for i in 0..n {
+                        let r_i = r_lh[i];
+                        let one_minus_r = F::one() - r_i;
+                        let cur_size = 1usize << i;
+                        for j in (0..cur_size).rev() {
+                            eq[j + cur_size] = eq[j] * r_i;
+                            eq[j] = eq[j] * one_minus_r;
+                        }
+                    }
+                    // Print eq table entries for comparison with Zolt
+                    if s == 0 {
+                        use ark_serialize::CanonicalSerialize;
+                        for k in 0..size {
+                            let mut eb = [0u8; 32];
+                            eq[k].serialize_compressed(&mut eb[..]).ok();
+                            let eh: String = eb.iter().map(|b| format!("{:02x}", b)).collect();
+                            eprintln!("[JOLT_EQ_LH] eq[{}]_LE=[{}]", k, eh);
+                        }
+                    }
+                    let mut sum = F::zero();
+                    for k in 0..val.len() {
+                        let prod = val.get_coeff(k) * eq[k];
+                        sum += prod;
+                        if s == 0 && (k < 3 || k == val.len() - 1) {
+                            use ark_serialize::CanonicalSerialize;
+                            let mut pb = [0u8; 32]; prod.serialize_compressed(&mut pb[..]).ok();
+                            let mut sb = [0u8; 32]; sum.serialize_compressed(&mut sb[..]).ok();
+                            let phs: String = pb[..8].iter().map(|b| format!("{:02x}", b)).collect();
+                            let shs: String = sb[..8].iter().map(|b| format!("{:02x}", b)).collect();
+                            eprintln!("[JOLT_PARTIAL_SUM] k={}: prod_LE=[{}] sum_LE=[{}]", k, phs, shs);
+                        }
+                    }
+                    sum
+                };
                 let eq_eval = EqPolynomial::<F>::mle(r_cycle, &r_cycle_prime.r);
                 let stage_contrib = (val_eval + raf) * eq_eval * gamma;
                 let bound_val = (val_eval + raf) * gamma;
                 {
                     use ark_serialize::CanonicalSerialize;
                     let mut vb = [0u8; 32]; val_eval.serialize_compressed(&mut vb[..]).ok();
+                    let mut lb = [0u8; 32]; lh_val_eval.serialize_compressed(&mut lb[..]).ok();
                     let mut eb = [0u8; 32]; eq_eval.serialize_compressed(&mut eb[..]).ok();
                     let mut bb = [0u8; 32]; bound_val.serialize_compressed(&mut bb[..]).ok();
                     let vh: String = vb.iter().map(|b| format!("{:02x}", b)).collect();
+                    let lh: String = lb.iter().map(|b| format!("{:02x}", b)).collect();
                     let eh: String = eb.iter().map(|b| format!("{:02x}", b)).collect();
                     let bh: String = bb.iter().map(|b| format!("{:02x}", b)).collect();
-                    eprintln!("[BCRAF_VERIFY] stage[{}]: val_eval_LE=[{}] eq_LE=[{}] bound_val_LE=[{}]",
-                        s, vh, eh, bh);
+                    eprintln!("[BCRAF_VERIFY] stage[{}]: val_eval_LE=[{}]", s, vh);
+                    eprintln!("[BCRAF_VERIFY] stage[{}]: lh_eval_LE=[{}] match_val={}", s, lh, lh_val_eval == val_eval);
+                    eprintln!("[BCRAF_VERIFY] stage[{}]: eq_LE=[{}] bound_val_LE=[{}]", s, eh, bh);
                 }
                 stage_contrib
             })
@@ -1267,6 +2049,17 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
         let rv_claim_5 = Self::compute_rv_claim_5(opening_accumulator, &stage5_gammas);
         let rv_claims = [rv_claim_1, rv_claim_2, rv_claim_3, rv_claim_4, rv_claim_5];
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            for (i, rv) in rv_claims.iter().enumerate() {
+                use ark_serialize::CanonicalSerialize;
+                let mut bytes = [0u8; 32];
+                rv.serialize_compressed(&mut bytes[..]).ok();
+                eprintln!("[JOLT_BCRAF] rv_claim[{}]_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    i, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+            }
+        }
+
         // Pre-compute eq_r_register for stages 4 and 5 (they use different r_register points)
         let r_register_4 = opening_accumulator
             .get_virtual_polynomial_opening(
@@ -1327,25 +2120,47 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
             }
         }
 
-        // Fused pass: compute all val polynomials in a single parallel iteration
+        // Compute val polynomials. When Zolt raw words are available, use the Zolt-specific
+        // code path that properly handles termination entries (LUI/ADDI/SB at termination_base_pc).
+        // The vanilla compute_val_polys would treat those entries as NoOp since the bytecode
+        // array only contains Instruction::NoOp at those indices.
         #[cfg(feature = "zolt-debug")]
         let val_polys = {
-            // Use Zolt-compatible flag computation from raw instruction words
-            let raw_words = super::ZOLT_RAW_WORDS.get()
-                .expect("ZOLT_RAW_WORDS must be set before verification (call ZOLT_RAW_WORDS.set() in main.rs)");
-            let termination_address = *super::ZOLT_TERMINATION_ADDRESS.get()
-                .expect("ZOLT_TERMINATION_ADDRESS must be set before verification");
-            let zolt_flags = ZoltBytecodeFlags::from_raw_words(raw_words, bytecode, termination_address);
-            Self::compute_val_polys_zolt(
-                &zolt_flags,
-                &eq_r_register_4,
-                &eq_r_register_5,
-                &stage1_gammas,
-                &stage2_gammas,
-                &stage3_gammas,
-                &stage4_gammas,
-                &stage5_gammas,
-            )
+            let raw_words_opt = super::ZOLT_RAW_WORDS.get();
+            let term_addr_opt = super::ZOLT_TERMINATION_ADDRESS.get();
+            if let (Some(raw_words), Some(&term_addr)) = (raw_words_opt, term_addr_opt) {
+                eprintln!("[BCRAF] Using compute_val_polys_zolt with {} raw words, termination_addr=0x{:x}", raw_words.len(), term_addr);
+                let zolt_flags = ZoltBytecodeFlags::from_raw_words(raw_words, bytecode, term_addr);
+                // Pad to bytecode_K if needed
+                let bytecode_k = bytecode.len();
+                let mut padded_flags = zolt_flags;
+                while padded_flags.len() < bytecode_k {
+                    padded_flags.push(ZoltBytecodeFlags::noop());
+                }
+                padded_flags.truncate(bytecode_k);
+                Self::compute_val_polys_zolt(
+                    &padded_flags,
+                    &eq_r_register_4,
+                    &eq_r_register_5,
+                    &stage1_gammas,
+                    &stage2_gammas,
+                    &stage3_gammas,
+                    &stage4_gammas,
+                    &stage5_gammas,
+                )
+            } else {
+                eprintln!("[BCRAF] Using vanilla compute_val_polys (no Zolt raw words)");
+                Self::compute_val_polys(
+                    bytecode,
+                    &eq_r_register_4,
+                    &eq_r_register_5,
+                    &stage1_gammas,
+                    &stage2_gammas,
+                    &stage3_gammas,
+                    &stage4_gammas,
+                    &stage5_gammas,
+                )
+            }
         };
         #[cfg(not(feature = "zolt-debug"))]
         let val_polys = Self::compute_val_polys(
@@ -1359,12 +2174,48 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
             &stage5_gammas,
         );
 
+        // Debug: print all val poly values for comparison with Zolt
+        #[cfg(feature = "zolt-debug")]
+        {
+            let K = bytecode.len();
+            for s in 0..5 {
+                for k in 0..K {
+                    use ark_serialize::CanonicalSerialize;
+                    let mut bytes = [0u8; 32];
+                    val_polys[s].get_coeff(k).serialize_compressed(&mut bytes[..]).ok();
+                    let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                    eprintln!("[JOLT_VAL_POLY] Val[{}][{}]_LE=[{}]", s, k, hex_str);
+                }
+            }
+        }
+
         let int_poly = IdentityPolynomial::new(one_hot_params.bytecode_k.log_2());
 
         let (_, raf_claim) = opening_accumulator
             .get_virtual_polynomial_opening(VirtualPolynomial::PC, SumcheckId::SpartanOuter);
         let (_, raf_shift_claim) = opening_accumulator
             .get_virtual_polynomial_opening(VirtualPolynomial::PC, SumcheckId::SpartanShift);
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut bytes = [0u8; 32];
+            raf_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT_BCRAF] raf_claim_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+            raf_shift_claim.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT_BCRAF] raf_shift_claim_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+            // Per-stage claims with RAF folded in
+            let cps0 = rv_claim_1 + gamma_powers[5] * raf_claim;
+            let cps2 = rv_claim_3 + gamma_powers[4] * raf_shift_claim;
+            cps0.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT_BCRAF] claim_per_stage[0]_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+            cps2.serialize_compressed(&mut bytes[..]).ok();
+            eprintln!("[JOLT_BCRAF] claim_per_stage[2]_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+        }
+
         let input_claim = [
             rv_claim_1,
             rv_claim_2,
@@ -1406,6 +2257,24 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
             r_cycle_4.r,
             r_cycle_5.r,
         ];
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            for (stage, rc) in r_cycles.iter().enumerate() {
+                eprint!("[JOLT_BCRAF] r_cycle[{}] (len={}):", stage, rc.len());
+                for (i, v) in rc.iter().enumerate() {
+                    // Convert Challenge to F first, then serialize
+                    let f_val: F = (*v).into();
+                    let mut bytes = [0u8; 32];
+                    f_val.serialize_compressed(&mut bytes[..]).ok();
+                    eprint!(" [{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}]",
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+                    if i >= 3 { eprint!("..."); break; }
+                }
+                eprintln!();
+            }
+        }
 
         // Note: We don't have r_address at this point (it comes from sumcheck_challenges),
         // so we initialize r_address_chunks as empty and will compute it later
@@ -1636,20 +2505,32 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
                 let circuit_flags = &flags.circuit_flags;
                 let instr_flags = &flags.instruction_flags;
 
-                if k < 20 {
+                if k < 20 || (k >= 30 && k <= 50) {
+                    let imm_field_dbg = ZoltBytecodeFlags::encode_imm_field::<F>(flags);
+                    use ark_serialize::CanonicalSerialize;
+                    let mut imm_bytes = [0u8; 32];
+                    imm_field_dbg.serialize_compressed(&mut imm_bytes[..]).ok();
+                    let imm_hex: String = imm_bytes.iter().map(|b| format!("{:02x}", b)).collect();
                     eprintln!(
-                        "[ZOLT_VAL_POLY] k={} addr=0x{:08x} rd={:?} rs1={:?} rs2={:?} imm={} cf={:?} if={:?} lt={:?} interleaved={}",
-                        k, flags.address, flags.rd, flags.rs1, flags.rs2,
-                        flags.imm, &circuit_flags, &instr_flags, flags.lookup_table_index,
+                        "[ZOLT_VAL_POLY] k={} addr=0x{:08x} opcode=0x{:02x} funct3={} rd={:?} rs1={:?} rs2={:?} imm={} imm_field_LE=[{}] cf={:?} if={:?} lt={:?} interleaved={}",
+                        k, flags.address, flags.opcode, flags.funct3,
+                        flags.rd, flags.rs1, flags.rs2,
+                        flags.imm, imm_hex,
+                        &circuit_flags, &instr_flags, flags.lookup_table_index,
                         flags.is_interleaved
                     );
                 }
 
                 // Stage 1 (Spartan outer sumcheck)
                 // Val(k) = unexpanded_pc(k) + γ·imm(k) + γ²·cf[0](k) + ...
+                // Per-opcode immediate encoding matching Zolt's stage6_prover.zig:
+                //   ADDI(funct3=0)/ADDIW(funct3=0)/JAL/JALR → unsigned u64 bitcast
+                //   LUI/AUIPC → truncated u32
+                //   Everything else → signed field value (from_i128)
                 {
+                    let imm_field = ZoltBytecodeFlags::encode_imm_field::<F>(flags);
                     let mut lc = F::from_u64(flags.address as u64);
-                    lc += F::from_i128(flags.imm) * stage1_gammas[1];
+                    lc += imm_field * stage1_gammas[1];
                     for (i, flag) in circuit_flags.iter().enumerate() {
                         if *flag {
                             lc += stage1_gammas[2 + i];
@@ -1678,7 +2559,8 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
 
                 // Stage 3 (Shift sumcheck)
                 {
-                    let mut lc = F::from_i128(flags.imm);
+                    let imm_field = ZoltBytecodeFlags::encode_imm_field::<F>(flags);
+                    let mut lc = imm_field;
                     lc += stage3_gammas[1].mul_u64(flags.address as u64);
                     if instr_flags[InstructionFlags::LeftOperandIsRs1Value as usize] {
                         lc += stage3_gammas[2];
@@ -1737,9 +2619,9 @@ impl<F: JoltField> BytecodeReadRafSumcheckParams<F> {
                 }
             });
 
-        // Debug: print first 4 vals for each stage in hex LE format
+        // Debug: print all vals for each stage in hex LE format
         for s in 0..5 {
-            for k in 0..std::cmp::min(K, 4) {
+            for k in 0..K {
                 use ark_serialize::CanonicalSerialize;
                 let mut bytes = [0u8; 32];
                 vals[s][k].serialize_compressed(&mut bytes[..]).ok();

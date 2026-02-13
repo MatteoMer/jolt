@@ -246,8 +246,31 @@ fn verify_zolt_proof(proof_path: &str, zolt_preprocessing_path: Option<&str>) {
                         offset += 4;
                     }
                 }
-                println!("  Decoded {} instructions from ELF", instructions.len() - 1);
-                Some((instructions, raw_words))
+                println!("  Decoded {} raw instructions from ELF", instructions.len() - 1);
+
+                // Expand virtual sequences (ADDIW → ADDI + VirtualSignExtendWord, etc.)
+                // This matches what guest::decode does via inline_sequence.
+                // The NoOp at index 0 returns empty from inline_sequence, so we
+                // handle it separately: prepend NoOp, then expand the rest.
+                use tracer::utils::virtual_registers::VirtualRegisterAllocator;
+                use tracer::emulator::cpu::Xlen;
+                let allocator = VirtualRegisterAllocator::default();
+                let xlen = Xlen::Bit64; // Zolt targets RV64
+                let mut expanded_instructions = vec![TracerInstruction::NoOp]; // index 0 = NoOp
+                let mut expanded_raw_words: Vec<u32> = vec![0]; // NoOp has no raw word
+                for (i, instr) in instructions.iter().enumerate().skip(1) {
+                    // Skip the manually-prepended NoOp at index 0
+                    let expanded = instr.inline_sequence(&allocator, xlen);
+                    let parent_word = if i < raw_words.len() { raw_words[i] } else { 0 };
+                    for exp_instr in expanded {
+                        expanded_raw_words.push(parent_word);
+                        expanded_instructions.push(exp_instr);
+                    }
+                }
+                println!("  Expanded from {} raw to {} instructions (with virtual sequences)",
+                    instructions.len() - 1, expanded_instructions.len() - 1);
+
+                Some((expanded_instructions, expanded_raw_words))
             } else {
                 println!("  WARNING: Not enough bytes for ELF program data");
                 None

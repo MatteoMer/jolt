@@ -932,7 +932,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             rs2_ra_claim.serialize_compressed(&mut rs2_ra_bytes[..]).ok();
             rd_wa_claim.serialize_compressed(&mut rd_wa_bytes[..]).ok();
             inc_claim.serialize_compressed(&mut inc_bytes[..]).ok();
+            let mut gamma_bytes = [0u8; 32];
+            self.params.gamma.serialize_compressed(&mut gamma_bytes[..]).ok();
             eprintln!("RegistersRWC expected_output_claim:");
+            eprintln!("  gamma:        {:02x?}", &gamma_bytes);
             eprintln!("  val_claim:    {:02x?}", &val_bytes);
             eprintln!("  rs1_ra_claim: {:02x?}", &rs1_ra_bytes);
             eprintln!("  rs2_ra_claim: {:02x?}", &rs2_ra_bytes);

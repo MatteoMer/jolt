@@ -257,6 +257,10 @@ impl Transcript for KeccakTranscript {
     fn debug_state(&self) -> [u8; 32] {
         self.state
     }
+    #[cfg(feature = "zolt-debug")]
+    fn debug_n_rounds(&self) -> u32 {
+        self.n_rounds
+    }
 }
 
 #[cfg(test)]

@@ -239,7 +239,7 @@ impl BatchedSumcheck {
             eprintln!("Stage 3 verifier - appending input claims (max_num_rounds={}):", max_num_rounds);
         }
         #[cfg(feature = "zolt-debug")]
-        if max_num_rounds == 15 {
+        if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 {
             eprintln!("Stage 4 verifier - appending input claims:");
             eprintln!("Stage 4 verifier - transcript state BEFORE input claims: {:02x?}", &transcript.debug_state());
         }
@@ -248,13 +248,13 @@ impl BatchedSumcheck {
             eprintln!("Stage 2 verifier - appending input claims (max_num_rounds={}):", max_num_rounds);
         }
         #[cfg(feature = "zolt-debug")]
-        if max_num_rounds == 136 || max_num_rounds == 134 {
+        if max_num_rounds == 136 || max_num_rounds == 134 || max_num_rounds == 139 {
             eprintln!("Stage 5 verifier - appending input claims (max_num_rounds={}):", max_num_rounds);
         }
         sumcheck_instances.iter().enumerate().for_each(|(idx, sumcheck)| {
             let input_claim = sumcheck.input_claim(opening_accumulator);
             #[cfg(feature = "zolt-debug")]
-            if max_num_rounds == 15 {
+            if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 {
                 use ark_serialize::CanonicalSerialize;
                 let mut claim_bytes = [0u8; 32];
                 input_claim.serialize_compressed(&mut claim_bytes[..]).ok();
@@ -262,7 +262,7 @@ impl BatchedSumcheck {
                 eprintln!("  Stage 4 transcript BEFORE appending instance[{}]: {:02x?}", idx, &transcript.debug_state()[0..8]);
             }
             #[cfg(feature = "zolt-debug")]
-            if max_num_rounds == 8 || max_num_rounds == 6 || max_num_rounds == 24 || max_num_rounds == 136 || max_num_rounds == 134 {
+            if max_num_rounds == 4 || max_num_rounds == 8 || max_num_rounds == 6 || max_num_rounds == 24 || max_num_rounds == 136 || max_num_rounds == 134 || max_num_rounds == 139 {
                 use ark_serialize::CanonicalSerialize;
                 let mut claim_bytes = [0u8; 32];
                 input_claim.serialize_compressed(&mut claim_bytes[..]).ok();
@@ -270,15 +270,15 @@ impl BatchedSumcheck {
             }
             transcript.append_scalar(&input_claim);
             #[cfg(feature = "zolt-debug")]
-            if max_num_rounds == 15 {
+            if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 {
                 eprintln!("  Stage 4 transcript AFTER appending instance[{}]: {:02x?}", idx, &transcript.debug_state()[0..8]);
             }
         });
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
         #[cfg(feature = "zolt-debug")]
-        if max_num_rounds == 8 || max_num_rounds == 6 || max_num_rounds == 15 || max_num_rounds == 24 || max_num_rounds == 136 || max_num_rounds == 134 {
-            let stage = if max_num_rounds == 8 || max_num_rounds == 6 { "Stage 3" } else if max_num_rounds == 15 { "Stage 4" } else if max_num_rounds == 136 || max_num_rounds == 134 { "Stage 5" } else { "Stage 2" };
+        if max_num_rounds == 4 || max_num_rounds == 8 || max_num_rounds == 6 || max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 || max_num_rounds == 24 || max_num_rounds == 136 || max_num_rounds == 134 || max_num_rounds == 139 {
+            let stage = if max_num_rounds == 4 { "Stage 7" } else if max_num_rounds == 8 || max_num_rounds == 6 { "Stage 3" } else if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 { "Stage 4" } else if max_num_rounds == 136 || max_num_rounds == 134 || max_num_rounds == 139 { "Stage 5" } else { "Stage 2" };
             eprintln!("{} verifier - batching coeffs:", stage);
             for (idx, coeff) in batching_coeffs.iter().enumerate() {
                 use ark_serialize::CanonicalSerialize;
@@ -307,7 +307,7 @@ impl BatchedSumcheck {
                 let scaled = input_claim.mul_pow_2(max_num_rounds - num_rounds);
                 let contribution = scaled * coeff;
                 #[cfg(feature = "zolt-debug")]
-                if max_num_rounds == 136 {
+                if max_num_rounds == 136 || max_num_rounds == 139 || max_num_rounds == 14 || max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 {
                     use ark_serialize::CanonicalSerialize;
                     let mut ic_bytes = [0u8; 32];
                     let mut sc_bytes = [0u8; 32];
@@ -315,7 +315,8 @@ impl BatchedSumcheck {
                     input_claim.serialize_compressed(&mut ic_bytes[..]).ok();
                     scaled.serialize_compressed(&mut sc_bytes[..]).ok();
                     contribution.serialize_compressed(&mut co_bytes[..]).ok();
-                    eprintln!("[S5 INIT] instance[{}]: num_rounds={}, scale_by={}", idx, num_rounds, max_num_rounds - num_rounds);
+                    let stage_name = if max_num_rounds == 14 { "S6" } else if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 { "S4" } else { "S5" };
+                    eprintln!("[{} INIT] instance[{}]: num_rounds={}, scale_by={}", stage_name, idx, num_rounds, max_num_rounds - num_rounds);
                     eprintln!("  input_claim: {:02x?}", &ic_bytes);
                     eprintln!("  scaled:      {:02x?}", &sc_bytes);
                     eprintln!("  contribution (scaled*coeff): {:02x?}", &co_bytes);
@@ -333,6 +334,17 @@ impl BatchedSumcheck {
             eprintln!("  initial_claim: {:02x?}", &claim_bytes);
             eprintln!("  max_num_rounds: {}", max_num_rounds);
             eprintln!("  max_degree: {}", max_degree);
+            // Print Stage 4 round polys (first 3 rounds)
+            if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 {
+                for (round_idx, poly) in proof.compressed_polys.iter().take(3).enumerate() {
+                    eprintln!("  Stage4 round {} coeffs_except_linear:", round_idx);
+                    for (i, c) in poly.coeffs_except_linear_term.iter().enumerate() {
+                        let mut bytes = [0u8; 32];
+                        c.serialize_compressed(&mut bytes[..]).ok();
+                        eprintln!("    [{}]: {:02x?}", i, &bytes);
+                    }
+                }
+            }
             // Print first 3 rounds' coefficients for Stage 3 (8 rounds)
             if max_num_rounds == 8 {
                 for (round_idx, poly) in proof.compressed_polys.iter().take(3).enumerate() {
@@ -352,8 +364,8 @@ impl BatchedSumcheck {
                     eprintln!("    [{}]: {:02x?}", i, &bytes);
                 }
             }
-            // For Stage 5 (136 rounds), print first 3 rounds' coefficients
-            if max_num_rounds == 136 || max_num_rounds == 134 {
+            // For Stage 5 (136+ rounds), print first 3 rounds' coefficients
+            if max_num_rounds >= 134 && max_num_rounds <= 145 {
                 eprintln!("[STAGE5 DEBUG] First 3 rounds' coefficients:");
                 for (round_idx, poly) in proof.compressed_polys.iter().take(3).enumerate() {
                     eprintln!("  Round {} (degree {}):", round_idx, poly.degree());
@@ -367,7 +379,7 @@ impl BatchedSumcheck {
         }
 
         #[cfg(feature = "zolt-debug")]
-        if max_num_rounds == 13 {
+        if max_num_rounds == 13 || max_num_rounds == 14 {
             use ark_serialize::CanonicalSerialize;
             let mut claim_bytes = [0u8; 32];
             claim.serialize_compressed(&mut claim_bytes[..]).ok();
@@ -399,6 +411,18 @@ impl BatchedSumcheck {
             eprintln!("[Stage 2] About to call cache_openings for each instance...");
         }
 
+        #[cfg(feature = "zolt-debug")]
+        if max_num_rounds == 13 || max_num_rounds == 14 {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[Stage 6] r_sumcheck.len() = {}", r_sumcheck.len());
+            for (i, r) in r_sumcheck.iter().enumerate() {
+                let r_as_f: F = (*r).into();
+                let mut c_bytes = [0u8; 32];
+                r_as_f.serialize_compressed(&mut c_bytes[..]).ok();
+                eprintln!("[Stage 6] r_sumcheck[{}] LE: {:02x?}", i, &c_bytes);
+            }
+        }
+
         let expected_output_claim: F = sumcheck_instances
             .iter()
             .zip(batching_coeffs.iter())
@@ -413,13 +437,27 @@ impl BatchedSumcheck {
                 if max_num_rounds == 8 || max_num_rounds == 6 {
                     eprintln!("[Stage 3 cache_openings] Instance {} about to call cache_openings", idx);
                 }
+                #[cfg(feature = "zolt-debug")]
+                if max_num_rounds == 13 || max_num_rounds == 14 || max_num_rounds == 19 {
+                    let s = transcript.debug_state();
+                    eprint!("[Stage 6 cache_openings] Instance {} BEFORE: ", idx);
+                    for b in &s[..8] { eprint!("{:02x} ", b); }
+                    eprintln!();
+                }
                 sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
+                #[cfg(feature = "zolt-debug")]
+                if max_num_rounds == 13 || max_num_rounds == 14 || max_num_rounds == 19 {
+                    let s = transcript.debug_state();
+                    eprint!("[Stage 6 cache_openings] Instance {} AFTER: ", idx);
+                    for b in &s[..8] { eprint!("{:02x} ", b); }
+                    eprintln!();
+                }
                 #[cfg(feature = "zolt-debug")]
                 if max_num_rounds == 8 || max_num_rounds == 6 {
                     eprintln!("[Stage 3 cache_openings] Instance {} done", idx);
                 }
                 #[cfg(feature = "zolt-debug")]
-                if (max_num_rounds == 136 || max_num_rounds == 134) && idx == 2 {
+                if (max_num_rounds == 136 || max_num_rounds == 134 || max_num_rounds == 139) && idx == 2 {
                     use ark_serialize::CanonicalSerialize;
                     eprintln!("[Stage5 Instance 2] r_slice len = {}", r_slice.len());
                     if r_slice.len() > 127 {
@@ -437,9 +475,9 @@ impl BatchedSumcheck {
                 let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
 
                 #[cfg(feature = "zolt-debug")]
-                if max_num_rounds == 24 || max_num_rounds == 15 || max_num_rounds == 136 || max_num_rounds == 134 || max_num_rounds == 6 || max_num_rounds == 13 {
+                if max_num_rounds == 24 || max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 || (max_num_rounds >= 130 && max_num_rounds <= 145) || max_num_rounds == 6 || max_num_rounds == 13 || max_num_rounds == 14 || max_num_rounds == 19 {
                     use ark_serialize::CanonicalSerialize;
-                    let stage = if max_num_rounds == 6 { "Stage 3" } else if max_num_rounds == 24 { "Stage 2" } else if max_num_rounds == 15 { "Stage 4" } else if max_num_rounds == 13 { "Stage 6" } else { "Stage 5" };
+                    let stage = if max_num_rounds == 6 { "Stage 3" } else if max_num_rounds == 24 { "Stage 2" } else if max_num_rounds == 15 || max_num_rounds == 16 || max_num_rounds == 17 { "Stage 4" } else if max_num_rounds == 13 || max_num_rounds == 14 { "Stage 6" } else if max_num_rounds == 19 { "RealStage6" } else { "Stage 5" };
                     let mut claim_bytes = [0u8; 32];
                     claim.serialize_compressed(&mut claim_bytes[..]).ok();
                     let mut coeff_bytes = [0u8; 32];
@@ -471,7 +509,7 @@ impl BatchedSumcheck {
 
                 let contribution = claim * coeff;
                 #[cfg(feature = "zolt-debug")]
-                if max_num_rounds == 136 {
+                if (max_num_rounds >= 130 && max_num_rounds <= 145) || max_num_rounds == 13 || max_num_rounds == 14 || max_num_rounds == 19 {
                     use ark_serialize::CanonicalSerialize;
                     let mut contrib_bytes2 = [0u8; 32];
                     contribution.serialize_compressed(&mut contrib_bytes2[..]).ok();
@@ -482,7 +520,19 @@ impl BatchedSumcheck {
             .sum();
 
         #[cfg(feature = "zolt-debug")]
-        if max_num_rounds == 136 {
+        if max_num_rounds == 13 || max_num_rounds == 14 || max_num_rounds == 19 {
+            use ark_serialize::CanonicalSerialize;
+            let mut sum_bytes = [0u8; 32];
+            expected_output_claim.serialize_compressed(&mut sum_bytes[..]).ok();
+            eprintln!("[SUM_S6 DEBUG] expected_output_claim (sum of {}): {:02x?}", sumcheck_instances.len(), &sum_bytes);
+            let mut out_bytes = [0u8; 32];
+            output_claim.serialize_compressed(&mut out_bytes[..]).ok();
+            eprintln!("[SUM_S6 DEBUG] output_claim (from sumcheck): {:02x?}", &out_bytes);
+            eprintln!("[SUM_S6 DEBUG] match? {}", expected_output_claim == output_claim);
+        }
+
+        #[cfg(feature = "zolt-debug")]
+        if max_num_rounds >= 130 && max_num_rounds <= 145 {
             use ark_serialize::CanonicalSerialize;
             use ark_serialize::CanonicalDeserialize;
             let mut sum_bytes = [0u8; 32];
@@ -568,15 +618,21 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 e.serialize_compressed(&mut e_bytes[..]).ok();
                 eprintln!("[JOLT_VERIFIER] Stage1 initial_claim: {:02x?}", &e_bytes);
             }
-            if num_rounds == 15 {
+            if num_rounds == 15 || num_rounds == 16 {
                 let mut e_bytes = [0u8; 32];
                 e.serialize_compressed(&mut e_bytes[..]).ok();
                 eprintln!("[JOLT_VERIFIER] Stage4 initial_claim (hint for round 0): {:02x?}", &e_bytes);
             }
-            if num_rounds == 136 || num_rounds == 134 {
+            if num_rounds >= 130 && num_rounds <= 145 {
                 let mut e_bytes = [0u8; 32];
                 e.serialize_compressed(&mut e_bytes[..]).ok();
-                eprintln!("[S5V] initial_claim (e before R0): {:02x?}", &e_bytes[0..16]);
+                eprintln!("[S5V] initial_claim (e before R0, num_rounds={}): {:02x?}", num_rounds, &e_bytes[0..16]);
+            }
+            if num_rounds == 19 && degree_bound == 5 {
+                let mut e_bytes = [0u8; 32];
+                e.serialize_compressed(&mut e_bytes[..]).ok();
+                eprintln!("[RS6V] initial_claim (hint for R0): {:02x?}", &e_bytes);
+                eprintln!("[RS6V] num_rounds={}, degree_bound={}", num_rounds, degree_bound);
             }
         }
 
@@ -618,6 +674,51 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                         let mut c_bytes = [0u8; 32];
                         c.serialize_compressed(&mut c_bytes[..]).ok();
                         eprintln!("[JOLT_VERIFIER] Stage1 Round {} coeff[{}]: {:02x?}", i, j, &c_bytes);
+                    }
+                }
+                // Print Stage 4 (16 rounds) - all iterations
+                if num_rounds == 16 || num_rounds == 15 {
+                    let mut e_bytes = [0u8; 32];
+                    let mut r_bytes = [0u8; 32];
+                    e.serialize_compressed(&mut e_bytes[..]).ok();
+                    let r_field: F = r_i.into();
+                    r_field.serialize_compressed(&mut r_bytes[..]).ok();
+                    eprintln!("[JOLT_VERIFIER] Stage4 Round {} challenge: {:02x?}", i, &r_bytes[0..16]);
+                    eprintln!("[JOLT_VERIFIER] Stage4 Round {} new_claim: {:02x?}", i, &e_bytes[0..16]);
+                }
+                // Print Stage 7 (4 rounds) - all iterations
+                if num_rounds == 4 {
+                    let mut e_bytes = [0u8; 32];
+                    let mut r_bytes = [0u8; 32];
+                    e.serialize_compressed(&mut e_bytes[..]).ok();
+                    let r_field: F = r_i.into();
+                    r_field.serialize_compressed(&mut r_bytes[..]).ok();
+                    eprintln!("[JOLT_VERIFIER] Stage7 Round {} challenge: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]", i,
+                        r_bytes[0], r_bytes[1], r_bytes[2], r_bytes[3], r_bytes[4], r_bytes[5], r_bytes[6], r_bytes[7]);
+                    eprintln!("[JOLT_VERIFIER] Stage7 Round {} new_claim: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]", i,
+                        e_bytes[0], e_bytes[1], e_bytes[2], e_bytes[3], e_bytes[4], e_bytes[5], e_bytes[6], e_bytes[7]);
+                    for (j, c) in self.compressed_polys[i].coeffs_except_linear_term.iter().enumerate() {
+                        let mut c_bytes = [0u8; 32];
+                        c.serialize_compressed(&mut c_bytes[..]).ok();
+                        eprintln!("[JOLT_VERIFIER] Stage7 Round {} coeff[{}]: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]", i, j,
+                            c_bytes[0], c_bytes[1], c_bytes[2], c_bytes[3], c_bytes[4], c_bytes[5], c_bytes[6], c_bytes[7]);
+                    }
+                }
+                // Print Stage 6 (13 or 14 rounds) - all iterations
+                if num_rounds == 13 || num_rounds == 14 {
+                    let mut e_bytes = [0u8; 32];
+                    let mut r_bytes = [0u8; 32];
+                    e.serialize_compressed(&mut e_bytes[..]).ok();
+                    let r_field: F = r_i.into();
+                    r_field.serialize_compressed(&mut r_bytes[..]).ok();
+                    eprintln!("[JOLT_VERIFIER] Stage6 Round {} challenge: {:02x?}", i, &r_bytes);
+                    eprintln!("[JOLT_VERIFIER] Stage6 Round {} new_claim: {:02x?}", i, &e_bytes);
+                    // Also print round polynomial coefficients
+                    eprintln!("[JOLT_VERIFIER] Stage6 Round {} degree={} coeffs:", i, self.compressed_polys[i].degree());
+                    for (j, c) in self.compressed_polys[i].coeffs_except_linear_term.iter().enumerate() {
+                        let mut c_bytes = [0u8; 32];
+                        c.serialize_compressed(&mut c_bytes[..]).ok();
+                        eprintln!("[JOLT_VERIFIER] Stage6 Round {} coeff[{}]: {:02x?}", i, j, &c_bytes);
                     }
                 }
                 // Print Stage 2 (24 rounds) - rounds 16-23 for InstructionClaimReduction
@@ -675,15 +776,40 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                         eprintln!("    coeff[{}]={:02x?}", j, &c_bytes[0..8]);
                     }
                 }
-                // Print Stage 5 (136 rounds) - ALL rounds for claim tracking
-                if num_rounds == 136 || num_rounds == 134 {
+                // Print RealStage6 (19 rounds, max_degree=5) - ALL rounds
+                if num_rounds == 19 && degree_bound == 5 {
                     let mut r_bytes = [0u8; 32];
                     let r_field: F = r_i.into();
                     r_field.serialize_compressed(&mut r_bytes[..]).ok();
                     let mut e_bytes = [0u8; 32];
                     e.serialize_compressed(&mut e_bytes[..]).ok();
-                    // Print hint (e before eval) and new claim for EVERY round
-                    eprintln!("  [S5V] R{} challenge={:02x?} new_e={:02x?} degree={}", i, &r_bytes[0..16], &e_bytes[0..16], self.compressed_polys[i].degree());
+                    eprintln!("  [RS6V] R{} challenge={:02x?}", i, &r_bytes);
+                    eprintln!("  [RS6V] R{} new_claim={:02x?}", i, &e_bytes);
+                    eprintln!("  [RS6V] R{} degree={} num_coeffs={}", i, self.compressed_polys[i].degree(), self.compressed_polys[i].coeffs_except_linear_term.len());
+                    for (j, c) in self.compressed_polys[i].coeffs_except_linear_term.iter().enumerate() {
+                        let mut c_bytes = [0u8; 32];
+                        c.serialize_compressed(&mut c_bytes[..]).ok();
+                        eprintln!("  [RS6V] R{} coeff[{}]={:02x?}", i, j, &c_bytes);
+                    }
+                }
+                // Print Stage 5 - ALL rounds for claim tracking
+                if num_rounds >= 130 && num_rounds <= 145 {
+                    let mut r_bytes = [0u8; 32];
+                    let r_field: F = r_i.into();
+                    r_field.serialize_compressed(&mut r_bytes[..]).ok();
+                    let mut e_bytes = [0u8; 32];
+                    e.serialize_compressed(&mut e_bytes[..]).ok();
+                    // Print coefficients c0, c2 for comparison with prover
+                    let coeffs = &self.compressed_polys[i].coeffs_except_linear_term;
+                    let mut c0_bytes = [0u8; 32];
+                    coeffs[0].serialize_compressed(&mut c0_bytes[..]).ok();
+                    if coeffs.len() > 1 {
+                        let mut c2_bytes = [0u8; 32];
+                        coeffs[1].serialize_compressed(&mut c2_bytes[..]).ok();
+                        eprintln!("  [S5V] R{} c0={:02x?} c2={:02x?} challenge={:02x?} new_e={:02x?} deg={}", i, &c0_bytes[0..16], &c2_bytes[0..16], &r_bytes[0..16], &e_bytes[0..16], self.compressed_polys[i].degree());
+                    } else {
+                        eprintln!("  [S5V] R{} c0={:02x?} challenge={:02x?} new_e={:02x?} deg={}", i, &c0_bytes[0..16], &r_bytes[0..16], &e_bytes[0..16], self.compressed_polys[i].degree());
+                    }
                 }
             }
         }

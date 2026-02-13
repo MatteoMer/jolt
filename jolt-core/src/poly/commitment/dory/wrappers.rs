@@ -377,6 +377,13 @@ impl<'a, T: Transcript> DoryTranscript for JoltToDoryTranscript<'a, T> {
             .transcript
             .as_mut()
             .expect("Transcript not initialized");
+        #[cfg(feature = "zolt-debug")]
+        {
+            let label_str = std::str::from_utf8(_label).unwrap_or("?");
+            eprintln!("[DORY TRANSCRIPT] append_bytes label={} len={} first8={:02x?}",
+                label_str, bytes.len(),
+                &bytes[..std::cmp::min(8, bytes.len())]);
+        }
         transcript.append_bytes(bytes);
     }
 
@@ -398,6 +405,14 @@ impl<'a, T: Transcript> DoryTranscript for JoltToDoryTranscript<'a, T> {
         let mut buffer = Vec::new();
         g.serialize_compressed(&mut buffer)
             .expect("DorySerialize serialization should not fail");
+        #[cfg(feature = "zolt-debug")]
+        {
+            let label_str = std::str::from_utf8(_label).unwrap_or("?");
+            eprintln!("[DORY TRANSCRIPT] append_group label={} len={} first8={:02x?} last8={:02x?}",
+                label_str, buffer.len(),
+                &buffer[..std::cmp::min(8, buffer.len())],
+                &buffer[buffer.len().saturating_sub(8)..]);
+        }
         transcript.append_bytes(&buffer);
     }
 
@@ -410,6 +425,14 @@ impl<'a, T: Transcript> DoryTranscript for JoltToDoryTranscript<'a, T> {
         let mut buffer = Vec::new();
         s.serialize_compressed(&mut buffer)
             .expect("DorySerialize serialization should not fail");
+        #[cfg(feature = "zolt-debug")]
+        {
+            let label_str = std::str::from_utf8(_label).unwrap_or("?");
+            eprintln!("[DORY TRANSCRIPT] append_serde label={} len={} first8={:02x?} last8={:02x?}",
+                label_str, buffer.len(),
+                &buffer[..std::cmp::min(8, buffer.len())],
+                &buffer[buffer.len().saturating_sub(8)..]);
+        }
         transcript.append_bytes(&buffer);
     }
 

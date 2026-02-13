@@ -172,6 +172,15 @@ impl<F: JoltField> HammingWeightClaimReductionParams<F> {
 
         // Sample batching challenge γ and compute powers (3 claims per ra_i)
         let gamma: F = transcript.challenge_scalar();
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut gamma_bytes = [0u8; 32];
+            gamma.serialize_compressed(&mut gamma_bytes[..]).ok();
+            eprintln!("[HW] gamma_LE=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                gamma_bytes[0], gamma_bytes[1], gamma_bytes[2], gamma_bytes[3],
+                gamma_bytes[4], gamma_bytes[5], gamma_bytes[6], gamma_bytes[7]);
+        }
         let mut gamma_powers = Vec::with_capacity(3 * N);
         let mut power = F::one();
         for _ in 0..(3 * N) {
@@ -194,6 +203,27 @@ impl<F: JoltField> HammingWeightClaimReductionParams<F> {
         // and `GruenSplitEqPolynomial` when used with `BindingOrder::LowToHigh` (LSB bound first).
         let r_addr_bool = unified_bool_point.r[..log_k_chunk].to_vec();
         let r_cycle: Vec<F::Challenge> = unified_bool_point.r[log_k_chunk..].to_vec();
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[HW_PARAMS] r_addr_bool.len()={}, r_cycle.len()={}", r_addr_bool.len(), r_cycle.len());
+            eprintln!("[HW_PARAMS] unified_bool_point.r.len()={}", unified_bool_point.r.len());
+            for (i, v) in r_addr_bool.iter().enumerate() {
+                let v_as_f: F = (*v).into();
+                let mut v_bytes = [0u8; 32];
+                v_as_f.serialize_compressed(&mut v_bytes[..]).ok();
+                eprintln!("[HW_PARAMS] r_addr_bool[{}] LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    i, v_bytes[0], v_bytes[1], v_bytes[2], v_bytes[3], v_bytes[4], v_bytes[5], v_bytes[6], v_bytes[7]);
+            }
+            for (i, v) in r_cycle.iter().enumerate() {
+                let v_as_f: F = (*v).into();
+                let mut v_bytes = [0u8; 32];
+                v_as_f.serialize_compressed(&mut v_bytes[..]).ok();
+                eprintln!("[HW_PARAMS] r_cycle[{}] LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    i, v_bytes[0], v_bytes[1], v_bytes[2], v_bytes[3], v_bytes[4], v_bytes[5], v_bytes[6], v_bytes[7]);
+            }
+        }
 
         // Fetch claims for each ra_i
         let mut r_addr_virt = Vec::with_capacity(N);
@@ -225,12 +255,42 @@ impl<F: JoltField> HammingWeightClaimReductionParams<F> {
             // Booleanity claim (from booleanity sumcheck)
             let (_, bool_claim) =
                 accumulator.get_committed_polynomial_opening(*poly_type, SumcheckId::Booleanity);
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                let idx = claims_bool.len();
+                if idx == 15 || idx == 24 || idx == 29 || idx == 32 || idx == 34 || idx < 3 {
+                    let mut bc_bytes = [0u8; 32];
+                    bool_claim.serialize_compressed(&mut bc_bytes[..]).ok();
+                    eprintln!("[HW_PARAMS] bool_claim[{}] LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                        idx, bc_bytes[0], bc_bytes[1], bc_bytes[2], bc_bytes[3], bc_bytes[4], bc_bytes[5], bc_bytes[6], bc_bytes[7]);
+                }
+            }
             claims_bool.push(bool_claim);
 
             // Virtualization claim (with per-polynomial r_addr)
             let (virt_point, virt_claim) =
                 accumulator.get_committed_polynomial_opening(*poly_type, virt_sumcheck_id);
-            r_addr_virt.push(virt_point.r[..log_k_chunk].to_vec());
+            let virt_chunk = virt_point.r[..log_k_chunk].to_vec();
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                let idx = r_addr_virt.len();
+                // Print r_addr_virt for all indices
+                for (ci, v) in virt_chunk.iter().enumerate() {
+                    let v_as_f: F = (*v).into();
+                    let mut v_bytes = [0u8; 32];
+                    v_as_f.serialize_compressed(&mut v_bytes[..]).ok();
+                    eprintln!("[HW_PARAMS] r_addr_virt[{}][{}] LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                        idx, ci, v_bytes[0], v_bytes[1], v_bytes[2], v_bytes[3], v_bytes[4], v_bytes[5], v_bytes[6], v_bytes[7]);
+                }
+                // Also print virt_claim
+                let mut vc_bytes = [0u8; 32];
+                virt_claim.serialize_compressed(&mut vc_bytes[..]).ok();
+                eprintln!("[HW_PARAMS] virt_claim[{}] LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    idx, vc_bytes[0], vc_bytes[1], vc_bytes[2], vc_bytes[3], vc_bytes[4], vc_bytes[5], vc_bytes[6], vc_bytes[7]);
+            }
+            r_addr_virt.push(virt_chunk);
             claims_virt.push(virt_claim);
         }
 
@@ -256,6 +316,27 @@ impl<F: JoltField> SumcheckInstanceParams<F> for HammingWeightClaimReductionPara
             claim += self.gamma_powers[3 * i] * self.claims_hw[i];
             claim += self.gamma_powers[3 * i + 1] * self.claims_bool[i];
             claim += self.gamma_powers[3 * i + 2] * self.claims_virt[i];
+        }
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            // Print first few claims
+            for i in 0..std::cmp::min(3, self.polynomial_types.len()) {
+                let mut hw_bytes = [0u8; 32]; let mut bool_bytes = [0u8; 32]; let mut virt_bytes = [0u8; 32];
+                self.claims_hw[i].serialize_compressed(&mut hw_bytes[..]).ok();
+                self.claims_bool[i].serialize_compressed(&mut bool_bytes[..]).ok();
+                self.claims_virt[i].serialize_compressed(&mut virt_bytes[..]).ok();
+                eprintln!("[HW_INPUT] ra[{}] hw=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}] bool=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}] virt=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    i, hw_bytes[0], hw_bytes[1], hw_bytes[2], hw_bytes[3], hw_bytes[4], hw_bytes[5], hw_bytes[6], hw_bytes[7],
+                    bool_bytes[0], bool_bytes[1], bool_bytes[2], bool_bytes[3], bool_bytes[4], bool_bytes[5], bool_bytes[6], bool_bytes[7],
+                    virt_bytes[0], virt_bytes[1], virt_bytes[2], virt_bytes[3], virt_bytes[4], virt_bytes[5], virt_bytes[6], virt_bytes[7]);
+            }
+            let mut claim_bytes = [0u8; 32];
+            claim.serialize_compressed(&mut claim_bytes[..]).ok();
+            eprintln!("[HW_INPUT] input_claim=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}] N={}",
+                claim_bytes[0], claim_bytes[1], claim_bytes[2], claim_bytes[3],
+                claim_bytes[4], claim_bytes[5], claim_bytes[6], claim_bytes[7],
+                self.polynomial_types.len());
         }
         claim
     }
@@ -488,6 +569,17 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         // eq_bool_eval is shared across all polynomials (unified booleanity)
         let eq_bool_eval = EqPolynomial::mle(&rho_rev, &self.params.r_addr_bool);
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut eq_bool_bytes = [0u8; 32];
+            eq_bool_eval.serialize_compressed(&mut eq_bool_bytes[..]).ok();
+            eprintln!("[HW_VERIFY expected_output] eq_bool_eval LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                eq_bool_bytes[0], eq_bool_bytes[1], eq_bool_bytes[2], eq_bool_bytes[3],
+                eq_bool_bytes[4], eq_bool_bytes[5], eq_bool_bytes[6], eq_bool_bytes[7]);
+            eprintln!("[HW_VERIFY expected_output] r_addr_bool.len()={}, rho_rev.len()={}", self.params.r_addr_bool.len(), rho_rev.len());
+        }
+
         let mut output_claim = F::zero();
 
         for i in 0..N {
@@ -505,9 +597,35 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             let gamma_bool = self.params.gamma_powers[3 * i + 1];
             let gamma_virt = self.params.gamma_powers[3 * i + 2];
 
+            #[cfg(feature = "zolt-debug")]
+            if i < 3 || i == N - 1 {
+                use ark_serialize::CanonicalSerialize;
+                let mut g_bytes = [0u8; 32];
+                let mut eq_v_bytes = [0u8; 32];
+                g_i_claim.serialize_compressed(&mut g_bytes[..]).ok();
+                eq_virt_eval.serialize_compressed(&mut eq_v_bytes[..]).ok();
+                let contribution = g_i_claim * (gamma_hw + gamma_bool * eq_bool_eval + gamma_virt * eq_virt_eval);
+                let mut contrib_bytes = [0u8; 32];
+                contribution.serialize_compressed(&mut contrib_bytes[..]).ok();
+                eprintln!("[HW_VERIFY expected_output] i={}: G_i(rho)=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}] eq_virt=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}] contrib=[{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    i,
+                    g_bytes[0], g_bytes[1], g_bytes[2], g_bytes[3], g_bytes[4], g_bytes[5], g_bytes[6], g_bytes[7],
+                    eq_v_bytes[0], eq_v_bytes[1], eq_v_bytes[2], eq_v_bytes[3], eq_v_bytes[4], eq_v_bytes[5], eq_v_bytes[6], eq_v_bytes[7],
+                    contrib_bytes[0], contrib_bytes[1], contrib_bytes[2], contrib_bytes[3], contrib_bytes[4], contrib_bytes[5], contrib_bytes[6], contrib_bytes[7]);
+            }
+
             // G_i(ρ) · (γ_hw + γ_bool·eq_bool(ρ) + γ_virt·eq_virt(ρ))
             output_claim +=
                 g_i_claim * (gamma_hw + gamma_bool * eq_bool_eval + gamma_virt * eq_virt_eval);
+        }
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut out_bytes = [0u8; 32];
+            output_claim.serialize_compressed(&mut out_bytes[..]).ok();
+            eprintln!("[HW_VERIFY expected_output] FINAL expected_output_claim LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                out_bytes[0], out_bytes[1], out_bytes[2], out_bytes[3], out_bytes[4], out_bytes[5], out_bytes[6], out_bytes[7]);
         }
 
         output_claim
@@ -527,7 +645,36 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let r_address = r_address.r;
         let full_point = [r_address.as_slice(), self.params.r_cycle.as_slice()].concat();
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[HW_VERIFY cache_openings] N={}, sumcheck_challenges.len()={}", N, sumcheck_challenges.len());
+            for (i, c) in sumcheck_challenges.iter().enumerate() {
+                let c_as_f: F = (*c).into();
+                let mut c_bytes = [0u8; 32];
+                c_as_f.serialize_compressed(&mut c_bytes[..]).ok();
+                eprintln!("[HW_VERIFY] sumcheck_challenge[{}] LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                    i, c_bytes[0], c_bytes[1], c_bytes[2], c_bytes[3], c_bytes[4], c_bytes[5], c_bytes[6], c_bytes[7]);
+            }
+        }
+
         for i in 0..N {
+            #[cfg(feature = "zolt-debug")]
+            {
+                use ark_serialize::CanonicalSerialize;
+                let key = crate::poly::opening_proof::OpeningId::Polynomial(
+                    crate::poly::opening_proof::PolynomialId::Committed(self.params.polynomial_types[i]),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                if let Some((_, claim)) = accumulator.openings.get(&key) {
+                    let mut claim_bytes = [0u8; 32];
+                    claim.serialize_compressed(&mut claim_bytes[..]).ok();
+                    eprintln!("[HW_VERIFY cache_openings] poly[{}]={:?} G_i(rho) LE: [{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x},{:02x}]",
+                        i, self.params.polynomial_types[i],
+                        claim_bytes[0], claim_bytes[1], claim_bytes[2], claim_bytes[3],
+                        claim_bytes[4], claim_bytes[5], claim_bytes[6], claim_bytes[7]);
+                }
+            }
             accumulator.append_sparse(
                 transcript,
                 vec![self.params.polynomial_types[i]],

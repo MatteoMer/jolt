@@ -163,7 +163,38 @@ impl<F: JoltField> CanonicalDeserialize for Claims<F> {
                     continue;
                 }
             }
-            eprintln!("[Claims::deserialize] claim {} key = {:?}", i, key);
+            // Round-trip check for UnexpandedPC/SpartanShift
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::UnexpandedPC), SumcheckId::SpartanShift) = &key {
+                eprintln!("[ROUND-TRIP] claim {} byte_offset=0x{:x} (Zolt parser expects 0x10f2)", i, byte_offset);
+                let mut raw_bytes = [0u8; 32];
+                {
+                    use std::io::Read as _;
+                    reader.read_exact(&mut raw_bytes).map_err(|_| SerializationError::InvalidData)?;
+                }
+                eprintln!("[ROUND-TRIP] UnexpandedPC/SpartanShift RAW bytes: {:02x?}", &raw_bytes);
+                let mut cursor = std::io::Cursor::new(&raw_bytes[..]);
+                let claim_rt = F::deserialize_with_mode(&mut cursor, compress, validate)
+                    .map_err(|e| { eprintln!("[ROUND-TRIP] deserialize failed: {:?}", e); e })?;
+                let mut re_ser = [0u8; 32];
+                {
+                    use ark_serialize::CanonicalSerialize;
+                    claim_rt.serialize_compressed(&mut re_ser[..]).ok();
+                }
+                eprintln!("[ROUND-TRIP] Re-serialized:                         {:02x?}", &re_ser);
+                eprintln!("[ROUND-TRIP] Match: {}", raw_bytes == re_ser);
+                claims.insert(key, (OpeningPoint::default(), claim_rt));
+                byte_offset += 32;
+                eprintln!("[Claims::deserialize] claim {} key = {:?}", i, key);
+                continue;
+            }
+            // Print byte_offset for offset drift debugging
+            #[cfg(feature = "zolt-debug")]
+            if i < 130 || (i > 119 && i < 126) {
+                eprintln!("[Claims::deserialize] claim {} key = {:?} byte_offset=0x{:x}", i, key, byte_offset);
+            } else {
+                eprintln!("[Claims::deserialize] claim {} key = {:?}", i, key);
+            }
             let claim = match F::deserialize_with_mode(&mut reader, compress, validate) {
                 Ok(c) => c,
                 Err(e) => {
@@ -171,6 +202,19 @@ impl<F: JoltField> CanonicalDeserialize for Claims<F> {
                     return Err(e);
                 }
             };
+            // Debug: print Stage 3 claims (UnexpandedPC, PC, etc.) for comparison with Zolt prover
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Virtual(ref poly), ref sumcheck_id) = &key {
+                if *sumcheck_id == SumcheckId::SpartanShift
+                    || *sumcheck_id == SumcheckId::InstructionInputVirtualization
+                    || *sumcheck_id == SumcheckId::RegistersClaimReduction
+                {
+                    use ark_serialize::CanonicalSerialize;
+                    let mut ser_bytes = [0u8; 32];
+                    claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                    eprintln!("[Claims::deserialize] {:?}/{:?} claim (LE) = {:02x?}", poly, sumcheck_id, &ser_bytes);
+                }
+            }
             // Debug: print InstructionRa claims
             #[cfg(feature = "zolt-debug")]
             if let OpeningId::Polynomial(PolynomialId::Virtual(VirtualPolynomial::InstructionRa(idx)), sumcheck_id) = &key {
@@ -178,6 +222,16 @@ impl<F: JoltField> CanonicalDeserialize for Claims<F> {
                 let mut ser_bytes = [0u8; 32];
                 claim.serialize_compressed(&mut ser_bytes[..]).ok();
                 eprintln!("[Claims::deserialize] InstructionRa({}) {:?} claim = {:02x?}", idx, sumcheck_id, &ser_bytes[16..]);
+            }
+            // Debug: print Committed Booleanity claims
+            #[cfg(feature = "zolt-debug")]
+            if let OpeningId::Polynomial(PolynomialId::Committed(poly), ref sumcheck_id) = &key {
+                if *sumcheck_id == SumcheckId::Booleanity {
+                    use ark_serialize::CanonicalSerialize;
+                    let mut ser_bytes = [0u8; 32];
+                    claim.serialize_compressed(&mut ser_bytes[..]).ok();
+                    eprintln!("[Claims::deserialize] Booleanity {:?} claim_LE = {:02x?}", poly, &ser_bytes);
+                }
             }
             // Debug: print RegistersVal claim
             #[cfg(feature = "zolt-debug")]

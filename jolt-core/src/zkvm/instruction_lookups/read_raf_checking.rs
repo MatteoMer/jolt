@@ -1160,6 +1160,14 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
                 eprintln!("[JOLT INST2 R{}] eval_at_2 = {:02x?}", round, &bytes_2[..16]);
                 eprintln!("[JOLT INST2 R{}] read_checking = [{:02x?}, {:02x?}]", round, &bytes_rc0[..16], &bytes_rc1[..16]);
                 eprintln!("[JOLT INST2 R{}] raf = [{:02x?}, {:02x?}]", round, &bytes_raf0[..16], &bytes_raf1[..16]);
+                // Check multilinear: eval_2 should equal 2*eval_1 - eval_0 for degree-1 polynomial
+                let expected_eval_2 = eval_at_1 + eval_at_1 - eval_at_0;
+                let ml_match = eval_at_2 == expected_eval_2;
+                if !ml_match {
+                    let mut bytes_exp = [0u8; 32];
+                    expected_eval_2.serialize_compressed(&mut bytes_exp[..]).ok();
+                    eprintln!("[JOLT MULTILINEAR R{}] eval_2 != 2*eval_1 - eval_0! actual={:02x?} expected={:02x?}", round, &bytes_2[..16], &bytes_exp[..16]);
+                }
             }
         }
 
@@ -1337,6 +1345,72 @@ impl<F: JoltField> InstructionReadRafSumcheckProver<F> {
             )
             .map(F::from_barrett_reduce);
         let result_eval_2 = eval_2_right + eval_2_right - eval_2_left;
+
+        #[cfg(feature = "zolt-debug")]
+        if j == 0 {
+            use ark_serialize::CanonicalSerialize;
+            // Per-table eval_0 and eval_2 at round 0 (sequential for debugging)
+            let num_tables = lookup_tables.len();
+            let mut per_table_eval_0 = vec![F::zero(); num_tables];
+            let mut per_table_eval_2_left = vec![F::zero(); num_tables];
+            let mut per_table_eval_2_right = vec![F::zero(); num_tables];
+
+            for b_idx in 0..len / 2 {
+                let b = LookupBits::new(b_idx as u128, log_len - 1);
+                let prefixes_c0: Vec<_> = Prefixes::iter()
+                    .map(|prefix| {
+                        prefix.prefix_mle::<XLEN, F, F::Challenge>(
+                            &self.prefix_checkpoints,
+                            r_x,
+                            0,
+                            b,
+                            j,
+                        )
+                    })
+                    .collect();
+                let prefixes_c2: Vec<_> = Prefixes::iter()
+                    .map(|prefix| {
+                        prefix.prefix_mle::<XLEN, F, F::Challenge>(
+                            &self.prefix_checkpoints,
+                            r_x,
+                            2,
+                            b,
+                            j,
+                        )
+                    })
+                    .collect();
+
+                for (t_idx, (table, suffixes)) in lookup_tables.iter().zip(self.suffix_polys.iter()).enumerate() {
+                    let suffixes_left: Vec<_> =
+                        suffixes.iter().map(|suffix| suffix[b_idx]).collect();
+                    let suffixes_right: Vec<_> = suffixes
+                        .iter()
+                        .map(|suffix| suffix[b_idx + len / 2])
+                        .collect();
+                    per_table_eval_0[t_idx] += table.combine(&prefixes_c0, &suffixes_left);
+                    per_table_eval_2_left[t_idx] += table.combine(&prefixes_c2, &suffixes_left);
+                    per_table_eval_2_right[t_idx] += table.combine(&prefixes_c2, &suffixes_right);
+                }
+            }
+
+            for t_idx in 0..num_tables {
+                let e0 = per_table_eval_0[t_idx];
+                let e2 = per_table_eval_2_right[t_idx] + per_table_eval_2_right[t_idx] - per_table_eval_2_left[t_idx];
+                if e0 != F::zero() || e2 != F::zero() {
+                    let mut b0 = [0u8; 32];
+                    let mut b2 = [0u8; 32];
+                    let mut b2l = [0u8; 32];
+                    let mut b2r = [0u8; 32];
+                    e0.serialize_compressed(&mut b0[..]).ok();
+                    e2.serialize_compressed(&mut b2[..]).ok();
+                    per_table_eval_2_left[t_idx].serialize_compressed(&mut b2l[..]).ok();
+                    per_table_eval_2_right[t_idx].serialize_compressed(&mut b2r[..]).ok();
+                    eprintln!("[JOLT READ_CHECK R0] TABLE {} eval_0={:02x?}, eval_2={:02x?}, eval_2_left={:02x?}, eval_2_right={:02x?}",
+                        t_idx, &b0[..16], &b2[..16], &b2l[..16], &b2r[..16]);
+                }
+            }
+        }
+
         [eval_0, result_eval_2]
     }
 
@@ -1558,12 +1632,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             ch_64_as_f.serialize_compressed(&mut raw_ch_bytes64[..]).ok();
             eprintln!("  r_address_prime.r[64] (as F) = {:02x?}", &raw_ch_bytes64[16..]);
 
-            eprintln!("[InstructionReadRaf] Table MLE evaluations at r_address_prime:");
+            eprintln!("[InstructionReadRaf] ALL Table MLE evaluations at r_address_prime:");
             for (i, eval) in val_evals.iter().enumerate() {
-                if i == 0 || i == 1 || i == 9 {  // Tables used by Fibonacci
-                    let mut bytes = [0u8; 32];
-                    eval.serialize_compressed(&mut bytes[..]).ok();
-                    eprintln!("  table_eval[{}] (FULL 32) = {:02x?}", i, &bytes);
+                let mut bytes = [0u8; 32];
+                eval.serialize_compressed(&mut bytes[..]).ok();
+                // Only print tables used by collatz: 0, 1, 2, 6, 11, 21, 26
+                if i == 0 || i == 1 || i == 2 || i == 6 || i == 11 || i == 21 || i == 26 {
+                    eprintln!("  table[{}] val_eval(FULL 32 LE)={:02x?}", i, &bytes);
                 }
             }
         }
@@ -1678,22 +1753,25 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                 f.serialize_compressed(&mut buf).unwrap();
                 buf
             }
-            println!("InstructionReadRaf expected_output_claim debug:");
-            println!("  left_operand_eval:  {:02x?}", &to_bytes(&left_operand_eval)[..16]);
-            println!("  right_operand_eval: {:02x?}", &to_bytes(&right_operand_eval)[..16]);
-            println!("  identity_poly_eval: {:02x?}", &to_bytes(&identity_poly_eval)[..16]);
-            println!("  gamma:              {:02x?}", &to_bytes(&self.params.gamma)[..16]);
-            println!("  eq_eval_r_reduction: {:02x?}", &to_bytes(&eq_eval_r_reduction)[..16]);
-            println!("  ra_claim:           {:02x?}", &to_bytes(&ra_claim)[..16]);
-            println!("  raf_flag_claim:     {:02x?}", &to_bytes(&raf_flag_claim)[..16]);
-            println!("  raf_claim:          {:02x?}", &to_bytes(&raf_claim)[..16]);
-            println!("  val_claim:          {:02x?}", &to_bytes(&val_claim)[..16]);
-            println!("  r_reduction[0]:     {:02x?}", &to_bytes(&r_reduction[0]));
-            println!("  r_cycle_prime[0]:   {:02x?}", &to_bytes(&r_cycle_prime.r[0]));
-            println!("  r_reduction.len():  {}", r_reduction.len());
-            println!("  r_cycle_prime.len():{}", r_cycle_prime.r.len());
+            eprintln!("InstructionReadRaf expected_output_claim debug:");
+            eprintln!("  left_operand_eval:  {:02x?}", &to_bytes(&left_operand_eval)[..16]);
+            eprintln!("  right_operand_eval: {:02x?}", &to_bytes(&right_operand_eval)[..16]);
+            eprintln!("  identity_poly_eval: {:02x?}", &to_bytes(&identity_poly_eval)[..16]);
+            eprintln!("  gamma:              {:02x?}", &to_bytes(&self.params.gamma)[..16]);
+            eprintln!("  eq_eval_r_reduction: {:02x?}", &to_bytes(&eq_eval_r_reduction)[..16]);
+            eprintln!("  ra_claim:           {:02x?}", &to_bytes(&ra_claim)[..16]);
+            eprintln!("  raf_flag_claim:     {:02x?}", &to_bytes(&raf_flag_claim)[..16]);
+            eprintln!("  raf_claim:          {:02x?}", &to_bytes(&raf_claim)[..16]);
+            eprintln!("  val_claim FULL LE:  {:02x?}", &to_bytes(&val_claim));
+            eprintln!("  raf_claim FULL LE:  {:02x?}", &to_bytes(&raf_claim));
+            eprintln!("  eq_eval FULL LE:    {:02x?}", &to_bytes(&eq_eval_r_reduction));
+            eprintln!("  ra_claim FULL LE:   {:02x?}", &to_bytes(&ra_claim));
+            eprintln!("  r_reduction[0]:     {:02x?}", &to_bytes(&r_reduction[0]));
+            eprintln!("  r_cycle_prime[0]:   {:02x?}", &to_bytes(&r_cycle_prime.r[0]));
+            eprintln!("  r_reduction.len():  {}", r_reduction.len());
+            eprintln!("  r_cycle_prime.len():{}", r_cycle_prime.r.len());
             let final_result = eq_eval_r_reduction * ra_claim * (val_claim + self.params.gamma * raf_claim);
-            println!("  final_result:       {:02x?}", &to_bytes(&final_result)[..16]);
+            eprintln!("  final_result FULL LE:  {:02x?}", &to_bytes(&final_result));
         }
 
         eq_eval_r_reduction * ra_claim * (val_claim + self.params.gamma * raf_claim)

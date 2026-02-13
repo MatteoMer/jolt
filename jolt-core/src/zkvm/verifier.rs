@@ -203,18 +203,32 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         }
 
         eprintln!("[VERIFY] Starting Stage 1...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript before Stage 1: "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(" round=N/A"); }
         self.verify_stage1()?;
         eprintln!("[VERIFY] Stage 1 PASSED, starting Stage 2...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript before Stage 2: "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(); }
         self.verify_stage2()?;
         eprintln!("[VERIFY] Stage 2 PASSED, starting Stage 3...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript before Stage 3: "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(); }
         self.verify_stage3()?;
         eprintln!("[VERIFY] Stage 3 PASSED, starting Stage 4...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript before Stage 4: "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(); }
         self.verify_stage4()?;
         eprintln!("[VERIFY] Stage 4 PASSED, starting Stage 5...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript before Stage 5: "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(); }
         self.verify_stage5()?;
         eprintln!("[VERIFY] Stage 5 PASSED, starting Stage 6...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript AFTER Stage 5: "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(); }
         self.verify_stage6()?;
         eprintln!("[VERIFY] Stage 6 PASSED, starting Stage 7...");
+        #[cfg(feature = "zolt-debug")]
+        { let s = self.transcript.debug_state(); eprint!("[JOLT] Transcript AFTER Stage 6 (before Stage 7): "); for b in &s[..8] { eprint!("{:02x} ", b); } eprintln!(); }
         self.verify_stage7()?;
         eprintln!("[VERIFY] Stage 7 PASSED, starting Stage 8...");
         self.verify_stage8()?;
@@ -426,6 +440,17 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     }
 
     fn verify_stage6(&mut self) -> Result<(), anyhow::Error> {
+        // Debug: dump transcript state at Stage 6 entry
+        #[cfg(feature = "zolt-debug")]
+        {
+            let state = self.transcript.debug_state();
+            eprint!("[JOLT STAGE6] Transcript state at entry: {{ ");
+            for b in &state {
+                eprint!("{:02x} ", b);
+            }
+            eprintln!("}}");
+        }
+
         let n_cycle_vars = self.proof.trace_length.log_2();
         let bytecode_read_raf = BytecodeReadRafSumcheckVerifier::gen(
             &self.preprocessing.shared.bytecode,
@@ -621,6 +646,15 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
         }
 
+        // Debug: print Stage 8 claims for comparison with Zolt
+        {
+            eprintln!("[STAGE8_VERIFY] lagrange_factor = {:?}", lagrange_factor);
+            eprintln!("[STAGE8_VERIFY] num_claims = {}", polynomial_claims.len());
+            for (i, (poly, claim)) in polynomial_claims.iter().enumerate().take(5) {
+                eprintln!("[STAGE8_VERIFY] claim[{}] = {:?}, poly={:?}", i, claim, poly);
+            }
+        }
+
         // Advice polynomials: TrustedAdvice and UntrustedAdvice (from AdviceClaimReduction in Stage 6)
         // These are committed with smaller dimensions, so we apply Lagrange factors to embed
         // them in the top-left block of the main Dory matrix.
@@ -650,8 +684,10 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
         // 2. Sample gamma and compute powers for RLC
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
+        eprintln!("[STAGE8_VERIFY] Appending {} claims to transcript", claims.len());
         self.transcript.append_scalars(&claims);
         let gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
+        eprintln!("[STAGE8_VERIFY] gamma_powers[1] = {:?}", gamma_powers[1]);
 
         // Build state for computing joint commitment/claim
         let state = DoryOpeningState {
@@ -662,10 +698,17 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
         // Build commitments map
         let mut commitments_map = HashMap::new();
-        for (polynomial, commitment) in all_committed_polynomials(&self.one_hot_params)
+        for (i, (polynomial, commitment)) in all_committed_polynomials(&self.one_hot_params)
             .into_iter()
             .zip_eq(&self.proof.commitments)
+            .enumerate()
         {
+            if i < 3 {
+                use ark_serialize::CanonicalSerialize;
+                let mut buf = Vec::new();
+                commitment.serialize_compressed(&mut buf).unwrap();
+                eprintln!("[STAGE8_VERIFY] commitment[{}]={:?} bytes (first 32): {:02x?}", i, polynomial, &buf[..std::cmp::min(32, buf.len())]);
+            }
             commitments_map.insert(polynomial, commitment.clone());
         }
 
@@ -698,6 +741,33 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             .zip(claims.iter())
             .map(|(gamma, claim)| *gamma * claim)
             .sum();
+
+        eprintln!("[STAGE8_VERIFY] joint_claim = {:?}", joint_claim);
+        eprintln!("[STAGE8_VERIFY] opening_point len = {}", opening_point.r.len());
+
+        // Debug: print joint commitment
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut buf = Vec::new();
+            joint_commitment.serialize_compressed(&mut buf).unwrap();
+            eprintln!("[STAGE8_VERIFY] joint_commitment bytes (first 32): {:02x?}", &buf[..std::cmp::min(32, buf.len())]);
+        }
+
+        // Debug: print opening point
+        for (i, r) in opening_point.r.iter().enumerate() {
+            use ark_serialize::CanonicalSerialize;
+            let mut buf = Vec::new();
+            r.serialize_compressed(&mut buf).unwrap();
+            eprintln!("[STAGE8_VERIFY] opening_point[{}] LE: {:02x?}", i, &buf[..std::cmp::min(16, buf.len())]);
+        }
+
+        // Debug: print transcript state before Dory
+        #[cfg(feature = "zolt-debug")]
+        {
+            let state = self.transcript.debug_state();
+            let n_rounds = self.transcript.debug_n_rounds();
+            eprintln!("[STAGE8_VERIFY] transcript state BEFORE dory: {:02x?} n_rounds={}", &state[0..16], n_rounds);
+        }
 
         // Verify opening
         PCS::verify(

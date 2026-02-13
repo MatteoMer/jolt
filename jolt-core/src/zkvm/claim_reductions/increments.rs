@@ -93,6 +93,18 @@ impl<F: JoltField> IncClaimReductionSumcheckParams<F> {
         let gamma_sqr = gamma.square();
         let gamma_cub = gamma_sqr * gamma;
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut gamma_bytes = vec![];
+            gamma.serialize_compressed(&mut gamma_bytes).unwrap();
+            eprint!("[JOLT STAGE6] inc_gamma = [");
+            for i in 0..std::cmp::min(8, gamma_bytes.len()) {
+                eprint!("{:02x},", gamma_bytes[i]);
+            }
+            eprintln!("]");
+        }
+
         // Fetch opening points from accumulator
         let (r_cycle_stage2, _) = accumulator.get_committed_polynomial_opening(
             CommittedPolynomial::RamInc,
@@ -158,6 +170,32 @@ impl<F: JoltField> SumcheckInstanceParams<F> for IncClaimReductionSumcheckParams
             CommittedPolynomial::RdInc,
             SumcheckId::RegistersValEvaluation,
         );
+
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            fn _to_bytes<T: CanonicalSerialize>(f: &T) -> Vec<u8> {
+                let mut buf = vec![];
+                f.serialize_compressed(&mut buf).unwrap();
+                buf
+            }
+            let v1_bytes = _to_bytes(&v_1);
+            let v2_bytes = _to_bytes(&v_2);
+            let w1_bytes = _to_bytes(&w_1);
+            let w2_bytes = _to_bytes(&w_2);
+            eprint!("[JOLT STAGE6] IncClaim v1(RamInc@RamRWC) = [");
+            for i in 0..8 { eprint!("{:02x},", v1_bytes[i]); }
+            eprintln!("]");
+            eprint!("[JOLT STAGE6] IncClaim v2(RamInc@RamVal) = [");
+            for i in 0..8 { eprint!("{:02x},", v2_bytes[i]); }
+            eprintln!("]");
+            eprint!("[JOLT STAGE6] IncClaim w1(RdInc@RegsRWC) = [");
+            for i in 0..8 { eprint!("{:02x},", w1_bytes[i]); }
+            eprintln!("]");
+            eprint!("[JOLT STAGE6] IncClaim w2(RdInc@RegsVal) = [");
+            for i in 0..8 { eprint!("{:02x},", w2_bytes[i]); }
+            eprintln!("]");
+        }
 
         v_1 + gamma * v_2 + gamma_sqr * w_1 + gamma_cub * w_2
     }
@@ -689,7 +727,25 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             SumcheckId::IncClaimReduction,
         );
 
-        ram_inc_claim * eq_ram_combined + gamma_sqr * rd_inc_claim * eq_rd_combined
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let result = ram_inc_claim * eq_ram_combined + gamma_sqr * rd_inc_claim * eq_rd_combined;
+            let ser = |v: &F| -> [u8; 32] { let mut b = [0u8; 32]; v.serialize_compressed(&mut b[..]).ok(); b };
+            eprintln!("[INC_VERIFY] ram_inc_claim_LE={:02x?}", ser(&ram_inc_claim));
+            eprintln!("[INC_VERIFY] rd_inc_claim_LE={:02x?}", ser(&rd_inc_claim));
+            eprintln!("[INC_VERIFY] eq_r2_LE={:02x?}", ser(&eq_r2));
+            eprintln!("[INC_VERIFY] eq_r4_LE={:02x?}", ser(&eq_r4));
+            eprintln!("[INC_VERIFY] eq_s4_LE={:02x?}", ser(&eq_s4));
+            eprintln!("[INC_VERIFY] eq_s5_LE={:02x?}", ser(&eq_s5));
+            eprintln!("[INC_VERIFY] gamma_LE={:02x?}", ser(&gamma));
+            eprintln!("[INC_VERIFY] expected_output_LE={:02x?}", ser(&result));
+            return result;
+        }
+        #[cfg(not(feature = "zolt-debug"))]
+        {
+            ram_inc_claim * eq_ram_combined + gamma_sqr * rd_inc_claim * eq_rd_combined
+        }
     }
 
     fn cache_openings(

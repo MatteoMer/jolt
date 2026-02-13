@@ -284,10 +284,40 @@ mod tests {
         }
 
         // Load preprocessing
-        let preprocessing_bytes = fs::read(preprocessing_path)
+        let preprocessing_bytes = fs::read(&preprocessing_path)
             .expect("Failed to read preprocessing");
-        let preprocessing = PreprocessingType::deserialize_from_bytes(&preprocessing_bytes)
+        let mut pp_cursor = std::io::Cursor::new(&preprocessing_bytes);
+        let preprocessing = PreprocessingType::deserialize_compressed(&mut pp_cursor)
             .expect("Failed to deserialize preprocessing");
+
+        // Check for appended raw instruction words (Zolt-specific extension)
+        // Format: magic "ZOLT_RAW\n" (9 bytes) + count (u64 LE) + count * u32 LE words
+        {
+            let pos = pp_cursor.position() as usize;
+            let remaining = &preprocessing_bytes[pos..];
+            if remaining.len() >= 9 && &remaining[..9] == b"ZOLT_RAW\n" {
+                let mut offset = 9;
+                let count = u64::from_le_bytes(remaining[offset..offset+8].try_into().unwrap()) as usize;
+                offset += 8;
+                let mut raw_words = Vec::with_capacity(count);
+                for i in 0..count {
+                    let word = u32::from_le_bytes(remaining[offset + i*4..offset + i*4 + 4].try_into().unwrap());
+                    raw_words.push(word);
+                }
+                offset += count * 4;
+                let termination_base_pc = u64::from_le_bytes(remaining[offset..offset+8].try_into().unwrap()) as usize;
+                println!("Loaded {} raw instruction words from preprocessing (termination_base_pc={})", count, termination_base_pc);
+                // Set the globals so compute_val_polys_zolt is used
+                let _ = crate::zkvm::bytecode::ZOLT_RAW_WORDS.set(raw_words);
+                // Set termination address from preprocessing memory layout
+                let term_addr = preprocessing.shared.memory_layout.termination;
+                let _ = crate::zkvm::bytecode::ZOLT_TERMINATION_ADDRESS.set(term_addr);
+                let _ = crate::zkvm::bytecode::ZOLT_TERMINATION_BASE_PC.set(termination_base_pc);
+                println!("Set ZOLT_TERMINATION_ADDRESS = 0x{:x}, ZOLT_TERMINATION_BASE_PC = {}", term_addr, termination_base_pc);
+            } else {
+                println!("No raw instruction words found in preprocessing (pos={}, remaining={})", pos, remaining.len());
+            }
+        }
 
         // Load proof
         let proof_bytes = fs::read(proof_path).expect("Failed to read proof");
@@ -493,6 +523,68 @@ mod tests {
         println!("Bytes at cursor: {:02x?}", &proof_bytes[cursor.position() as usize..std::cmp::min(cursor.position() as usize + 50, proof_bytes.len())]);
 
         use crate::poly::commitment::dory::ArkDoryProof;
+        // Debug: manually parse Dory proof element-by-element
+        {
+            let save_pos = cursor.position();
+            use ark_bn254::{Fq12, G1Projective, G2Projective};
+            // VMV message
+            let c: Fq12 = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                Ok(v) => { println!("  VMV.c OK at 0x{:x}", save_pos); v },
+                Err(e) => { println!("  VMV.c FAIL at 0x{:x}: {:?}", cursor.position(), e); panic!("FAIL"); }
+            };
+            let d2: Fq12 = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                Ok(v) => { println!("  VMV.d2 OK"); v },
+                Err(e) => { println!("  VMV.d2 FAIL at 0x{:x}: {:?}", cursor.position(), e); panic!("FAIL"); }
+            };
+            let e1: G1Projective = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                Ok(v) => { println!("  VMV.e1 OK"); v },
+                Err(e) => { println!("  VMV.e1 FAIL at 0x{:x}: {:?}", cursor.position(), e); panic!("FAIL"); }
+            };
+            let num_rounds: u32 = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                Ok(v) => { println!("  num_rounds: {}", v); v },
+                Err(e) => { println!("  num_rounds FAIL: {:?}", e); panic!("FAIL"); }
+            };
+            for r in 0..num_rounds {
+                for name in ["d1_left", "d1_right", "d2_left", "d2_right"] {
+                    let _gt: Fq12 = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                        Ok(v) => v,
+                        Err(e) => { println!("  first_messages[{}].{} FAIL at 0x{:x}: {:?}", r, name, cursor.position(), e); panic!("FAIL"); }
+                    };
+                }
+                let _g1: G1Projective = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                    Ok(v) => v,
+                    Err(e) => { println!("  first_messages[{}].e1_beta FAIL at 0x{:x}: {:?}", r, cursor.position(), e); panic!("FAIL"); }
+                };
+                let _g2: G2Projective = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                    Ok(v) => v,
+                    Err(e) => { println!("  first_messages[{}].e2_beta FAIL at 0x{:x}: {:?}", r, cursor.position(), e); panic!("FAIL"); }
+                };
+                println!("  first_messages[{}] OK (cursor 0x{:x})", r, cursor.position());
+            }
+            for r in 0..num_rounds {
+                for name in ["c_plus", "c_minus"] {
+                    let _gt: Fq12 = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                        Ok(v) => v,
+                        Err(e) => { println!("  second_messages[{}].{} FAIL at 0x{:x}: {:?}", r, name, cursor.position(), e); panic!("FAIL"); }
+                    };
+                }
+                for name in ["e1_plus", "e1_minus"] {
+                    let _g1: G1Projective = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                        Ok(v) => v,
+                        Err(e) => { println!("  second_messages[{}].{} FAIL at 0x{:x}: {:?}", r, name, cursor.position(), e); panic!("FAIL"); }
+                    };
+                }
+                for name in ["e2_plus", "e2_minus"] {
+                    let _g2: G2Projective = match CanonicalDeserialize::deserialize_compressed(&mut cursor) {
+                        Ok(v) => v,
+                        Err(e) => { println!("  second_messages[{}].{} FAIL at 0x{:x}: {:?}", r, name, cursor.position(), e); panic!("FAIL"); }
+                    };
+                }
+                println!("  second_messages[{}] OK (cursor 0x{:x})", r, cursor.position());
+            }
+            println!("  All Dory elements parsed OK!");
+            cursor.set_position(save_pos);
+        }
         let opening_proof: ArkDoryProof = match ArkDoryProof::deserialize_compressed(&mut cursor) {
             Ok(p) => {
                 println!("Successfully parsed opening proof");
@@ -824,13 +916,18 @@ mod tests {
 
         use crate::poly::commitment::dory::{DoryGlobals, DoryContext};
 
-        // Generate SRS with 16 variables (65536 coefficients)
-        // This is enough for Jolt's typical use cases
-        let max_num_vars = 16;
+        // Generate SRS matching the fibonacci program:
+        // Jolt's JoltProverPreprocessing::new() computes:
+        //   max_padded_trace_length = 65536 (from compiled program)
+        //   max_T = 65536, max_log_T = 16
+        //   max_log_k_chunk = 4 (since 16 < ONEHOT_CHUNK_THRESHOLD_LOG_T=25)
+        //   max_num_vars = 4 + 16 = 20
+        // The max_num_vars determines which cached .urs file is used.
+        let max_num_vars = 20;
         println!("Generating Dory SRS with max_num_vars = {}", max_num_vars);
 
-        // Initialize DoryGlobals with K=1 polynomial, T=65536 coefficients
-        DoryGlobals::initialize_context(1, 1 << max_num_vars, DoryContext::Main, None);
+        // Initialize DoryGlobals
+        DoryGlobals::initialize_context(1 << 4, 1 << 16, DoryContext::Main, None);
 
         let prover_setup: ArkworksProverSetup = DoryCommitmentScheme::setup_prover(max_num_vars);
 
@@ -886,6 +983,24 @@ mod tests {
         h2_affine.serialize_uncompressed(&mut buf).expect("serialize h2");
         file.write_all(&buf).expect("write h2");
         println!("h2: {} bytes", buf.len());
+        println!("h2 uncompressed hex: {}", buf.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
+        // Also print h2 compressed for comparison with Zolt
+        let mut h2_compressed = Vec::new();
+        h2_affine.serialize_compressed(&mut h2_compressed).expect("serialize h2 compressed");
+        println!("h2 compressed hex ({} bytes): {}", h2_compressed.len(), h2_compressed.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
+        // Print h1 details too
+        let mut h1_compressed = Vec::new();
+        h1_affine.serialize_compressed(&mut h1_compressed).expect("serialize h1 compressed");
+        println!("h1 compressed hex ({} bytes): {}", h1_compressed.len(), h1_compressed.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
+        // Also export the verifier setup h2 to verify it matches
+        let verifier_setup = prover_setup.to_verifier_setup();
+        let vs_h2_affine: ark_bn254::G2Affine = verifier_setup.h2.0.into_affine();
+        let mut vs_h2_compressed = Vec::new();
+        vs_h2_affine.serialize_compressed(&mut vs_h2_compressed).expect("serialize vs h2 compressed");
+        println!("verifier_setup.h2 compressed hex: {}", vs_h2_compressed.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
 
         println!("\nExported Dory SRS to {}", output_path);
         println!("Total file size: {} bytes", std::fs::metadata(output_path).expect("stat").len());
@@ -1291,6 +1406,199 @@ fn test_zolt_gt_deserialization() {
         }
         Err(e) => {
             println!("Uncompressed deserialization FAILED: {:?}", e);
+        }
+    }
+}
+
+#[test]
+fn test_zolt_g2_compressed_points() {
+    use ark_bn254::{G2Affine, G2Projective, Fq2, Fq};
+    use ark_ec::{AffineRepr, CurveGroup};
+    use ark_ec::short_weierstrass::SWCurveConfig;
+    use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+    use std::io::Cursor;
+    use ark_ff::PrimeField;
+
+    // Read the test points file generated by Zolt
+    let data = match std::fs::read("/tmp/zolt_g2_test_points.bin") {
+        Ok(d) => d,
+        Err(e) => {
+            println!("Could not read /tmp/zolt_g2_test_points.bin: {:?}", e);
+            println!("Run Zolt's 'g2 compressed bytes for arkworks validation' test first");
+            return;
+        }
+    };
+
+    assert_eq!(data.len(), 192, "Expected 3 G2 points * 64 bytes = 192 bytes");
+
+    let names = ["generator", "[2]G2", "[42]G2"];
+    for i in 0..3 {
+        let point_bytes = &data[i * 64..(i + 1) * 64];
+        println!("\n=== G2 point: {} ===", names[i]);
+        println!("Compressed bytes: {:02x?}", point_bytes);
+
+        let mut cursor = Cursor::new(point_bytes);
+        match G2Affine::deserialize_compressed(&mut cursor) {
+            Ok(pt) => {
+                println!("  Deserialized OK!");
+                println!("  Is on curve: {}", pt.is_on_curve());
+                println!("  Is in subgroup: {}", pt.is_in_correct_subgroup_assuming_on_curve());
+            }
+            Err(e) => {
+                println!("  DESERIALIZATION FAILED: {:?}", e);
+
+                // Try to manually parse and check
+                let flag = point_bytes[63] >> 6;
+                println!("  Flag: {} (0=YisPos, 2=YisNeg, 1=Infinity)", flag);
+
+                // Read x.c0 and x.c1
+                let mut x_bytes = point_bytes.to_vec();
+                x_bytes[63] &= 0x3F; // clear flags
+
+                // Manually construct the Fq2 x-coordinate
+                let x_c0 = Fq::from_le_bytes_mod_order(&x_bytes[0..32]);
+                let x_c1 = Fq::from_le_bytes_mod_order(&x_bytes[32..64]);
+                let x = Fq2::new(x_c0, x_c1);
+                println!("  x.c0 = {:?}", x_c0);
+                println!("  x.c1 = {:?}", x_c1);
+
+                // Check if x^3 + b_twist has a sqrt
+                let b_twist = <ark_bn254::g2::Config as SWCurveConfig>::COEFF_B;
+                let y_squared = x * x * x + b_twist;
+                println!("  y^2 = x^3 + b = {:?}", y_squared);
+
+                // Try to recover y
+                use ark_ff::Field;
+                if let Some(y) = y_squared.sqrt() {
+                    println!("  y (recovered) = {:?}", y);
+                    // Use new_unchecked to avoid assertion panic
+                    let pt_manual = G2Affine::new_unchecked(x, y);
+                    println!("  On curve: {}", pt_manual.is_on_curve());
+                    println!("  In subgroup: {}", pt_manual.is_in_correct_subgroup_assuming_on_curve());
+                    let neg_pt = G2Affine::new_unchecked(x, -y);
+                    println!("  -y In subgroup: {}", neg_pt.is_in_correct_subgroup_assuming_on_curve());
+                } else {
+                    println!("  NO SQRT EXISTS for y^2 - point x is not on curve!");
+                }
+            }
+        }
+    }
+
+    // Also generate the expected G2 generator compressed bytes from arkworks
+    println!("\n=== Reference: arkworks G2 generator ===");
+    let g2_gen = G2Affine::generator();
+    let mut gen_bytes = Vec::new();
+    g2_gen.serialize_compressed(&mut gen_bytes).unwrap();
+    println!("Arkworks G2 generator compressed ({} bytes): {:02x?}", gen_bytes.len(), &gen_bytes[..]);
+
+    // And [2]G2
+    let two_g2 = (G2Projective::from(g2_gen) + G2Projective::from(g2_gen)).into_affine();
+    let mut two_bytes = Vec::new();
+    two_g2.serialize_compressed(&mut two_bytes).unwrap();
+    println!("Arkworks [2]G2 compressed: {:02x?}", &two_bytes[..]);
+
+    // And [42]G2
+    let scalar_42 = ark_bn254::Fr::from(42u64);
+    let g2_42 = (G2Projective::from(g2_gen) * scalar_42).into_affine();
+    let mut bytes_42 = Vec::new();
+    g2_42.serialize_compressed(&mut bytes_42).unwrap();
+    println!("Arkworks [42]G2 compressed: {:02x?}", &bytes_42[..]);
+
+    // Test the specific failing e2_beta from the proof
+    println!("\n=== Testing specific e2_beta from proof ===");
+    if let Ok(e2_data) = std::fs::read("/tmp/zolt_g2_test_e2beta.bin") {
+        if e2_data.len() == 64 {
+            println!("e2_beta bytes: {:02x?}", &e2_data[..]);
+            let mut e2_cursor = Cursor::new(&e2_data[..]);
+            match G2Affine::deserialize_compressed(&mut e2_cursor) {
+                Ok(pt) => {
+                    println!("  e2_beta Deserialized OK!");
+                    println!("  Is on curve: {}", pt.is_on_curve());
+                    println!("  Is in subgroup: {}", pt.is_in_correct_subgroup_assuming_on_curve());
+                }
+                Err(e) => {
+                    println!("  e2_beta DESERIALIZATION FAILED: {:?}", e);
+                    // Manual analysis
+                    let flag = e2_data[63] >> 6;
+                    println!("  Flag: {} (0=YisPos, 2=YisNeg, 1=Infinity)", flag);
+                    let mut x_bytes = e2_data.to_vec();
+                    x_bytes[63] &= 0x3F;
+                    let x_c0 = Fq::from_le_bytes_mod_order(&x_bytes[0..32]);
+                    let x_c1 = Fq::from_le_bytes_mod_order(&x_bytes[32..64]);
+                    let x = Fq2::new(x_c0, x_c1);
+                    println!("  x = {:?}", x);
+
+                    // Check curve equation
+                    let b_twist = <ark_bn254::g2::Config as SWCurveConfig>::COEFF_B;
+                    let y_squared = x * x * x + b_twist;
+                    use ark_ff::Field;
+                    if let Some(y) = y_squared.sqrt() {
+                        println!("  y (recovered) = {:?}", y);
+                        let pt_manual = G2Affine::new_unchecked(x, y);
+                        println!("  On curve: {}", pt_manual.is_on_curve());
+                        println!("  In subgroup: {}", pt_manual.is_in_correct_subgroup_assuming_on_curve());
+                        let neg_y_pt = G2Affine::new_unchecked(x, -y);
+                        println!("  -y In subgroup: {}", neg_y_pt.is_in_correct_subgroup_assuming_on_curve());
+                    } else {
+                        println!("  NO SQRT for y^2 - x is not on G2 curve!");
+                    }
+                }
+            }
+        }
+    }
+
+    // Compare Zolt vs arkworks for generator
+    println!("\n=== COMPARISON ===");
+    if data[0..64] == gen_bytes[..] {
+        println!("G2 GENERATOR: MATCH!");
+    } else {
+        println!("G2 GENERATOR: MISMATCH!");
+    }
+    if data[64..128] == two_bytes[..] {
+        println!("[2]G2: MATCH!");
+    } else {
+        println!("[2]G2: MISMATCH!");
+    }
+    if data[128..192] == bytes_42[..] {
+        println!("[42]G2: MATCH!");
+    } else {
+        println!("[42]G2: MISMATCH!");
+    }
+
+    // Check SRS G2 points
+    println!("\n=== Checking SRS G2 points ===");
+    if let Ok(srs_data) = std::fs::read("/tmp/zolt_g2_srs_points.bin") {
+        let count = u32::from_le_bytes(srs_data[0..4].try_into().unwrap()) as usize;
+        println!("SRS has {} G2 points", count);
+        let mut failed = 0;
+        let mut passed = 0;
+        for i in 0..count {
+            let point_bytes = &srs_data[4 + i * 64..4 + (i + 1) * 64];
+            let mut cursor = Cursor::new(point_bytes);
+            match G2Affine::deserialize_compressed(&mut cursor) {
+                Ok(_pt) => { passed += 1; }
+                Err(e) => {
+                    if failed < 5 {
+                        println!("  SRS G2[{}] FAILED: {:?}", i, e);
+                    }
+                    failed += 1;
+                }
+            }
+        }
+        println!("SRS G2 results: {} passed, {} failed", passed, failed);
+    }
+
+    // Check MSM result
+    println!("\n=== Checking MSM result ===");
+    if let Ok(msm_data) = std::fs::read("/tmp/zolt_g2_msm_test.bin") {
+        let mut cursor = Cursor::new(&msm_data[..]);
+        match G2Affine::deserialize_compressed(&mut cursor) {
+            Ok(_pt) => {
+                println!("  MSM G2 result: OK (in subgroup)");
+            }
+            Err(e) => {
+                println!("  MSM G2 result: FAILED: {:?}", e);
+            }
         }
     }
 }

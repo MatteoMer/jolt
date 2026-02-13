@@ -1540,7 +1540,10 @@ where
         } else {
             8
         };
-        let generators = PCS::setup_prover(max_log_k_chunk + max_log_T);
+        let max_num_vars = max_log_k_chunk + max_log_T;
+        println!("[JOLT_PREPROC] max_padded_trace_length={}, max_T={}, max_log_T={}, max_log_k_chunk={}, max_num_vars={}",
+            shared.max_padded_trace_length, max_T, max_log_T, max_log_k_chunk, max_num_vars);
+        let generators = PCS::setup_prover(max_num_vars);
         JoltProverPreprocessing { generators, shared }
     }
 

@@ -28,6 +28,9 @@ pub trait Transcript: Default + Clone + Sync + Send + 'static {
     /// Get transcript state (for debugging)
     #[cfg(feature = "zolt-debug")]
     fn debug_state(&self) -> [u8; 32];
+    /// Get transcript n_rounds (for debugging)
+    #[cfg(feature = "zolt-debug")]
+    fn debug_n_rounds(&self) -> u32;
 }
 
 pub trait AppendToTranscript {

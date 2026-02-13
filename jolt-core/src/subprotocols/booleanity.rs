@@ -524,10 +524,50 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for BooleanityS
             .chain(self.params.r_cycle.iter().cloned().rev())
             .collect();
 
-        EqPolynomial::<F>::mle(sumcheck_challenges, &combined_r)
-            * zip(&self.params.gamma_powers_square, ra_claims)
-                .map(|(gamma_2i, ra)| (ra.square() - ra) * gamma_2i)
-                .sum::<F>()
+        let eq_val = EqPolynomial::<F>::mle(sumcheck_challenges, &combined_r);
+        let sum_val: F = zip(&self.params.gamma_powers_square, &ra_claims)
+            .map(|(gamma_2i, ra)| (ra.square() - *ra) * gamma_2i)
+            .sum();
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            let mut eq_bytes = [0u8; 32];
+            let mut sum_bytes = [0u8; 32];
+            eq_val.serialize_compressed(&mut eq_bytes[..]).ok();
+            sum_val.serialize_compressed(&mut sum_bytes[..]).ok();
+            eprintln!("[BOOL_VERIFY_JOLT] eq_val_LE = {:02x?}", &eq_bytes[0..8]);
+            eprintln!("[BOOL_VERIFY_JOLT] sum_gamma_ra_LE = {:02x?}", &sum_bytes[0..8]);
+            eprintln!("[BOOL_VERIFY_JOLT] combined_r len={}, sc_challenges len={}", combined_r.len(), sumcheck_challenges.len());
+            // Print ALL combined_r and sc_challenges to find mismatch
+            for (idx, (sc, cr)) in sumcheck_challenges.iter().zip(combined_r.iter()).enumerate() {
+                let sc_f: F = (*sc).into();
+                let cr_f: F = (*cr).into();
+                let mut sc_bytes = [0u8; 32];
+                let mut cr_bytes = [0u8; 32];
+                sc_f.serialize_compressed(&mut sc_bytes[..]).ok();
+                cr_f.serialize_compressed(&mut cr_bytes[..]).ok();
+                // Compute eq factor: eq(a,b) = a*b + (1-a)*(1-b) = 1 - a - b + 2*a*b
+                let eq_factor = F::one() - sc_f - cr_f + sc_f * cr_f + sc_f * cr_f;
+                let mut ef_bytes = [0u8; 32];
+                eq_factor.serialize_compressed(&mut ef_bytes[..]).ok();
+                eprintln!("[BOOL_EQ_JOLT] idx={} sc={:02x?} cr={:02x?} eq_i={:02x?}", idx, &sc_bytes[0..8], &cr_bytes[0..8], &ef_bytes[0..8]);
+            }
+            // Print r_address (LE order, as stored)
+            eprintln!("[BOOL_VERIFY_JOLT] r_address len={}, r_cycle len={}", self.params.r_address.len(), self.params.r_cycle.len());
+            for (idx, r) in self.params.r_address.iter().enumerate() {
+                let r_f: F = (*r).into();
+                let mut r_bytes = [0u8; 32];
+                r_f.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("[BOOL_VERIFY_JOLT] r_address[{}] = {:02x?}", idx, &r_bytes[0..8]);
+            }
+            for (idx, r) in self.params.r_cycle.iter().enumerate() {
+                let r_f: F = (*r).into();
+                let mut r_bytes = [0u8; 32];
+                r_f.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("[BOOL_VERIFY_JOLT] r_cycle[{}] = {:02x?}", idx, &r_bytes[0..8]);
+            }
+        }
+        eq_val * sum_val
     }
 
     fn cache_openings(
