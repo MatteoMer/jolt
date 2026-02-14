@@ -309,16 +309,16 @@ impl ZoltBytecodeFlags {
             _ => 0,
         };
 
-        // Determine rd, rs1, rs2 matching Zolt's register matrix behavior:
-        // - rd:  None for S-format (0x23), B-format (0x63), and rd==0 (x0 never written)
-        //   Zolt's register write matrix has `rd != 0 and rd < 32` check, so rd=0 writes
-        //   are excluded. The val poly must match by setting rd=None for rd_raw==0.
+        // Determine rd, rs1, rs2 matching Zolt's bytecode entry encoding:
+        // - rd:  sentinel (None) ONLY for S-format (0x23) and B-format (0x63).
+        //   For all other formats, rd is kept as-is (even rd=0).
+        //   Zolt's Val polynomial uses `entry.rd < REGISTER_COUNT` (128),
+        //   so rd=0 contributes eq_r_register[0] (non-zero).
         // - rs1: None for U-type (LUI 0x37, AUIPC 0x17) and J-type (JAL 0x6f)
         // - rs2: None for I-type (0x13, 0x03, 0x67, 0x1b), U-type (0x37, 0x17), J-type (0x6f)
         // When None, the val poly contribution is zero.
         let rd = match opcode {
             0x23 | 0x63 => None,
-            _ if rd_raw == 0 => None,
             _ => Some(rd_raw),
         };
         let rs1 = match opcode {
@@ -509,7 +509,8 @@ impl ZoltBytecodeFlags {
     /// Instruction flags: LeftOperandIsRs1Value, IsRdNotZero (if rd != 0)
     /// Lookup table: SignExtendHalfWord (index 21)
     /// imm = 0, rs1 = rd (reads its own output), rs2 = None
-    fn virtual_sign_extend_word_entry(rd: u8, rs1: u8, address: usize, is_compressed: bool) -> Self {
+    fn virtual_sign_extend_word_entry(rd: u8, rs1: u8, address: usize,
+                                      vsr: u16, is_first: bool, is_compressed: bool) -> Self {
         use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
         let mut cf = [false; NUM_CIRCUIT_FLAGS];
         let mut inf = [false; NUM_INSTRUCTION_FLAGS];
@@ -517,12 +518,15 @@ impl ZoltBytecodeFlags {
         cf[CF::AddOperands as usize] = true;
         cf[CF::WriteLookupOutputToRD as usize] = true;
         cf[CF::VirtualInstruction as usize] = true;
-        // VirtualSignExtendWord is always the last in the sequence (vsr=0),
-        // so DoNotUpdateUnexpandedPC = false
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
         if is_compressed {
             cf[CF::IsCompressed as usize] = true;
         }
-        // IsFirstInSequence = false (always 2nd+ entry)
 
         inf[IF::LeftOperandIsRs1Value as usize] = true;
         // VirtualSignExtendWord does NOT set RightOperandIsImm
@@ -931,6 +935,244 @@ impl ZoltBytecodeFlags {
         }
     }
 
+    /// Create flags for a VirtualSRAI instruction within a virtual sequence.
+    /// Circuit flags: WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsImm, IsRdNotZero (if rd != 0)
+    /// Lookup table: VirtualSRA (index 27)
+    fn virtual_srai_entry(rd: u8, rs1: u8, bitmask: u64, address: usize,
+                          vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsImm as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(27), // VirtualSRA
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: None,
+            imm: bitmask as i128,
+            address,
+            opcode: 0x5B,  // Virtual instruction opcode space
+            funct3: 5,    // funct3=5 distinguishes VirtualSRAI from VirtualSRLI (funct3=0)
+        }
+    }
+
+    /// Create flags for a VirtualAssertValidDiv0 instruction.
+    /// Circuit flags: Assert, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+    /// Lookup table: ValidDiv0 (index 17)
+    fn virtual_assert_valid_div0_entry(rs1: u8, rs2: u8, address: usize,
+                                       vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::Assert as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(17), // ValidDiv0
+            is_interleaved,
+            rd: None,  // Assert doesn't write to rd
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x22,  // VirtualAssertValidDiv0 opcode
+            funct3: 1,    // funct3=1 distinguishes VirtualAssertValidDiv0 from VirtualAssertEQ (funct3=0)
+        }
+    }
+
+    /// Create flags for a VirtualChangeDivisorW instruction.
+    /// Circuit flags: WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: VirtualChangeDivisorW (index 31)
+    fn virtual_change_divisor_w_entry(rd: u8, rs1: u8, rs2: u8, address: usize,
+                                      vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(31), // VirtualChangeDivisorW
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x3b,  // VirtualChangeDivisorW opcode space
+            funct3: 6,    // funct3=6 distinguishes VirtualChangeDivisorW from ADDW/SUBW etc
+        }
+    }
+
+    /// Create flags for a SUB instruction within a virtual sequence.
+    /// Circuit flags: SubtractOperands, WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: RangeCheck (index 0)
+    fn virtual_sub_entry(rd: u8, rs1: u8, rs2: u8, address: usize,
+                         vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::SubtractOperands as usize] = true;
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(0), // RangeCheck
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x33,  // OP (SUB opcode space)
+            funct3: 0,
+        }
+    }
+
+    /// Create flags for an XOR instruction within a virtual sequence.
+    /// Circuit flags: WriteLookupOutputToRD, VirtualInstruction
+    /// Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value, IsRdNotZero (if rd != 0)
+    /// Lookup table: Xor (index 5)
+    fn virtual_xor_entry(rd: u8, rs1: u8, rs2: u8, address: usize,
+                         vsr: u16, is_first: bool, is_compressed: bool) -> Self {
+        use crate::zkvm::instruction::{NUM_INSTRUCTION_FLAGS, CircuitFlags as CF, InstructionFlags as IF};
+        let mut cf = [false; NUM_CIRCUIT_FLAGS];
+        let mut inf = [false; NUM_INSTRUCTION_FLAGS];
+
+        cf[CF::WriteLookupOutputToRD as usize] = true;
+        cf[CF::VirtualInstruction as usize] = true;
+        if vsr != 0 {
+            cf[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        }
+        if is_first {
+            cf[CF::IsFirstInSequence as usize] = true;
+        }
+        if is_compressed {
+            cf[CF::IsCompressed as usize] = true;
+        }
+
+        inf[IF::LeftOperandIsRs1Value as usize] = true;
+        inf[IF::RightOperandIsRs2Value as usize] = true;
+        if rd != 0 {
+            inf[IF::IsRdNotZero as usize] = true;
+        }
+
+        let is_interleaved = !cf[CF::AddOperands as usize]
+            && !cf[CF::SubtractOperands as usize]
+            && !cf[CF::MultiplyOperands as usize]
+            && !cf[CF::Advice as usize];
+
+        ZoltBytecodeFlags {
+            circuit_flags: cf,
+            instruction_flags: inf,
+            lookup_table_index: Some(5), // Xor
+            is_interleaved,
+            rd: if rd != 0 { Some(rd) } else { None },
+            rs1: Some(rs1),
+            rs2: Some(rs2),
+            imm: 0,
+            address,
+            opcode: 0x33,  // OP (XOR opcode space)
+            funct3: 4,
+        }
+    }
+
     /// Build Zolt-compatible flags from raw ELF bytes.
     /// `raw_words` must be the same length as `bytecode`.
     /// `termination_address` is used to construct the 3 termination instruction words.
@@ -967,6 +1209,9 @@ impl ZoltBytecodeFlags {
         use tracer::instruction::virtual_assert_eq::VirtualAssertEQ;
         use tracer::instruction::virtual_zero_extend_word::VirtualZeroExtendWord;
         use tracer::instruction::virtual_assert_valid_unsigned_remainder::VirtualAssertValidUnsignedRemainder;
+        use tracer::instruction::virtual_srai::VirtualSRAI;
+        use tracer::instruction::virtual_assert_valid_div0::VirtualAssertValidDiv0;
+        use tracer::instruction::virtual_change_divisor_w::VirtualChangeDivisorW;
 
         let mut result: Vec<Self> = raw_words.iter().zip(bytecode.iter()).enumerate().map(|(k, (word, instr))| {
             // Check if this is a termination entry
@@ -994,8 +1239,10 @@ impl ZoltBytecodeFlags {
             if matches!(instr, Instruction::VirtualSignExtendWord(_)) {
                 let rd_raw = norm.operands.rd.unwrap_or(0);
                 let rs1_raw = norm.operands.rs1.unwrap_or(rd_raw);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
                 return Self::virtual_sign_extend_word_entry(
-                    rd_raw, rs1_raw, norm.address, norm.is_compressed,
+                    rd_raw, rs1_raw, norm.address, vsr, is_first, norm.is_compressed,
                 );
             }
 
@@ -1092,6 +1339,72 @@ impl ZoltBytecodeFlags {
                     let rs2_raw = norm.operands.rs2.unwrap_or(0);
                     let is_first = norm.is_first_in_sequence;
                     return Self::virtual_add_entry(
+                        rd_raw, rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                    );
+                }
+            }
+
+            // Check if this is a VirtualSRAI instruction within a virtual sequence
+            // (produced by inline_sequence for REMW/DIVW - SRAI is expanded to VirtualSRAI)
+            if let Instruction::VirtualSRAI(vsrai) = instr {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_srai_entry(
+                    rd_raw, rs1_raw, vsrai.operands.imm as u64, norm.address,
+                    vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualAssertValidDiv0 instruction
+            // (produced by inline_sequence for REMW/DIVW)
+            if matches!(instr, Instruction::VirtualAssertValidDiv0(_)) {
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_assert_valid_div0_entry(
+                    rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a VirtualChangeDivisorW instruction
+            // (produced by inline_sequence for REMW/DIVW)
+            if matches!(instr, Instruction::VirtualChangeDivisorW(_)) {
+                let rd_raw = norm.operands.rd.unwrap_or(0);
+                let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                let vsr = norm.virtual_sequence_remaining.unwrap_or(0);
+                let is_first = norm.is_first_in_sequence;
+                return Self::virtual_change_divisor_w_entry(
+                    rd_raw, rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                );
+            }
+
+            // Check if this is a SUB instruction within a virtual sequence
+            // (produced by inline_sequence for REMW/DIVW)
+            if matches!(instr, Instruction::SUB(_)) {
+                if let Some(vsr) = norm.virtual_sequence_remaining {
+                    let rd_raw = norm.operands.rd.unwrap_or(0);
+                    let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                    let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                    let is_first = norm.is_first_in_sequence;
+                    return Self::virtual_sub_entry(
+                        rd_raw, rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
+                    );
+                }
+            }
+
+            // Check if this is an XOR instruction within a virtual sequence
+            // (produced by inline_sequence for REMW/DIVW)
+            if matches!(instr, Instruction::XOR(_)) {
+                if let Some(vsr) = norm.virtual_sequence_remaining {
+                    let rd_raw = norm.operands.rd.unwrap_or(0);
+                    let rs1_raw = norm.operands.rs1.unwrap_or(0);
+                    let rs2_raw = norm.operands.rs2.unwrap_or(0);
+                    let is_first = norm.is_first_in_sequence;
+                    return Self::virtual_xor_entry(
                         rd_raw, rs1_raw, rs2_raw, norm.address, vsr, is_first, norm.is_compressed,
                     );
                 }
