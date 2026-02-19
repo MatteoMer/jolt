@@ -88,30 +88,22 @@ impl ZoltBytecodeFlags {
     /// encoding as Zolt's stage6_prover.zig. This is critical for val polynomial
     /// consistency between prover and verifier.
     ///
-    /// Three categories:
-    ///   1. ADDI(funct3=0)/ADDIW(funct3=0)/JAL/JALR → unsigned u64 bitcast of sign-extended i64
-    ///   2. LUI/AUIPC → truncated u32 (recovers raw instr & 0xFFFFF000)
-    ///   3. Everything else → signed field value (from_i128)
+    /// Two categories:
+    ///   1. B-type (branches) / S-type (stores) → signed field value (from_i128)
+    ///   2. Everything else (I-type, U-type LUI/AUIPC, J-type, Virtual) → unsigned u64 bitcast
     fn encode_imm_field<F: JoltField>(flags: &ZoltBytecodeFlags) -> F {
-        let is_identity_add = match flags.opcode {
-            0x13 => flags.funct3 == 0, // ADDI
-            0x1b => flags.funct3 == 0, // ADDIW
-            0x6f => true,              // JAL
-            0x67 => true,              // JALR
-            _ => false,
-        };
-        if is_identity_add {
-            // Unsigned u64 bitcast of sign-extended i64 immediate
-            return F::from_u64(flags.imm as i64 as u64);
+        let is_signed_format = flags.opcode == 0x63 || // B-type (branches)
+                               flags.opcode == 0x23;   // S-type (stores)
+        if is_signed_format {
+            // B-type and S-type: signed field encoding (from_i128)
+            return F::from_i128(flags.imm);
         }
-        let is_u_type = flags.opcode == 0x37 || flags.opcode == 0x17;
-        if is_u_type {
-            // LUI/AUIPC: recover the raw u32 value (instr & 0xFFFFF000)
-            // flags.imm is sign-extended i32 → truncate the u64 bitcast to u32
-            return F::from_u64((flags.imm as i64 as u64 as u32) as u64);
-        }
-        // Everything else: signed field encoding
-        F::from_i128(flags.imm)
+        // All other formats (I-type, U-type LUI/AUIPC, J-type, Virtual):
+        // Use unsigned u64 bitcast of sign-extended i64 immediate.
+        // For LUI/AUIPC, flags.imm is sign-extended from i32 to i128,
+        // so casting to i64 then u64 gives the full 64-bit sign-extended value,
+        // matching the R1CS witness encoding in deriveImmediate().
+        F::from_u64(flags.imm as i64 as u64)
     }
 
     /// Compute Zolt-compatible flags from a raw 32-bit instruction word.
