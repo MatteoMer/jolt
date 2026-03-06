@@ -511,6 +511,20 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
                 }
             }
         }
+        #[cfg(feature = "zolt-debug")]
+        if polynomial == VirtualPolynomial::LookupOutput && sumcheck == SumcheckId::InstructionClaimReduction {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[GET_VIRTUAL] LookupOutput/InstructionClaimReduction retrieved:");
+            eprintln!("  point.r.len() = {}", point.r.len());
+            for (i, r) in point.r.iter().enumerate() {
+                let mut r_bytes = [0u8; 32];
+                r.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("  point.r[{}] LE = {:?}", i, &r_bytes[..16]);
+            }
+            let mut c_bytes = [0u8; 32];
+            claim.serialize_compressed(&mut c_bytes[..]).ok();
+            eprintln!("  claim LE = {:02x?}", &c_bytes);
+        }
         (point.clone(), *claim)
     }
 

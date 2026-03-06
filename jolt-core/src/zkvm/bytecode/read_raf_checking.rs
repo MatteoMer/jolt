@@ -482,15 +482,14 @@ impl ZoltBytecodeFlags {
         entry
     }
 
-    /// Create a termination instruction entry for the anchor instruction (SB vsr=0).
-    /// Only sets DoNotUpdateUnexpandedPC=true, NOT VirtualInstruction.
-    /// VirtualInstruction cannot be set for the anchor because:
-    ///   R1CS constraint 17: if VirtualInstruction then NextPC == PC + 1
-    ///   SB is the last real cycle before NoOp padding, so NextPC=0 ≠ PC+1.
+    /// Create a termination instruction entry for the anchor instruction (SB vsr=Some(0)).
+    /// Sets VirtualInstruction=true (matching vanilla Jolt's circuit_flags for SD with vsr=Some(0)).
+    /// DoNotUpdateUnexpandedPC stays false because a JAL-to-self follows the SB,
+    /// satisfying constraint 16 (NextUPC=SB_UPC+4=4) and constraint 17 (NextPC=tbpc+3).
     fn termination_entry_anchor(word: u32) -> Self {
         use crate::zkvm::instruction::{CircuitFlags as CF};
         let mut entry = Self::from_raw_word(word, 0);
-        entry.circuit_flags[CF::DoNotUpdateUnexpandedPC as usize] = true;
+        entry.circuit_flags[CF::VirtualInstruction as usize] = true;
         entry
     }
 
@@ -1214,6 +1213,10 @@ impl ZoltBytecodeFlags {
                     return Self::termination_entry_virtual(addi_word);
                 } else if k == tbpc + 2 {
                     return Self::termination_entry_anchor(sb_word);
+                } else if k == tbpc + 3 {
+                    // JAL-to-self: normal JAL instruction (not virtual)
+                    let jal_word: u32 = 0x0000006F; // JAL x0, 0
+                    return Self::from_raw_word(jal_word, 4);
                 }
             }
 
@@ -1486,13 +1489,15 @@ impl ZoltBytecodeFlags {
         // array. Check and fix if needed.
         if let Some(tbpc) = termination_base_pc {
             // Ensure the array is large enough
-            while result.len() <= tbpc + 2 {
+            while result.len() <= tbpc + 3 {
                 result.push(Self::noop());
             }
             // Overwrite in case they weren't set in the map above
             result[tbpc] = Self::termination_entry_virtual(lui_word);
             result[tbpc + 1] = Self::termination_entry_virtual(addi_word);
             result[tbpc + 2] = Self::termination_entry_anchor(sb_word);
+            let jal_word: u32 = 0x0000006F; // JAL x0, 0
+            result[tbpc + 3] = Self::from_raw_word(jal_word, 4);
         }
 
         // Debug: dump entries in same format as Zolt

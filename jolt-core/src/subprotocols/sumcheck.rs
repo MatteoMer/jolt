@@ -721,6 +721,18 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                         eprintln!("[JOLT_VERIFIER] Stage6 Round {} coeff[{}]: {:02x?}", i, j, &c_bytes);
                     }
                 }
+                // Print Stage 5 (136 rounds) - first 3 and last 10 rounds
+                if num_rounds >= 130 && num_rounds <= 145 {
+                    if i < 3 || i >= num_rounds - 10 {
+                        let mut e_bytes = [0u8; 32];
+                        let mut r_bytes = [0u8; 32];
+                        e.serialize_compressed(&mut e_bytes[..]).ok();
+                        let r_field: F = r_i.into();
+                        r_field.serialize_compressed(&mut r_bytes[..]).ok();
+                        eprintln!("[S5V] Round {} challenge: {:02x?}", i, &r_bytes[0..16]);
+                        eprintln!("[S5V] Round {} new_claim: {:02x?}", i, &e_bytes[0..16]);
+                    }
+                }
                 // Print Stage 2 (24 rounds) - rounds 16-23 for InstructionClaimReduction
                 if num_rounds == 24 && i >= 16 {
                     let mut r_bytes = [0u8; 32];

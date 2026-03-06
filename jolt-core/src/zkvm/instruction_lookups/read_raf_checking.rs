@@ -135,6 +135,18 @@ impl<F: JoltField> InstructionReadRafSumcheckParams<F> {
             SumcheckId::InstructionClaimReduction,
         );
 
+        #[cfg(feature = "zolt-debug")]
+        {
+            use ark_serialize::CanonicalSerialize;
+            eprintln!("[STAGE5] r_reduction.r.len() = {}, n_cycle_vars = {}", r_reduction.r.len(), n_cycle_vars);
+            for (i, r) in r_reduction.r.iter().enumerate() {
+                let r_as_f: F = (*r).into();
+                let mut r_bytes = [0u8; 32];
+                r_as_f.serialize_compressed(&mut r_bytes[..]).ok();
+                eprintln!("[STAGE5] r_reduction[{}] LE(F) = {:02x?}", i, &r_bytes[..16]);
+            }
+        }
+
         Self {
             gamma,
             gamma_sqr,
